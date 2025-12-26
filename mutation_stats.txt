@@ -1,0 +1,9 @@
+Type,Name,Calls,Wins,Rate
+Mut,Cross,0,0,0.00
+Mut,Mut_Aggro,0,0,0.00
+Mut,Mut_Spatial,0,0,0.00
+Mut,Mut_Simple,0,0,0.00
+Mut,LB_Chain,0,0,0.00
+Mut,LB_Swap,0,0,0.00
+Mut,LB_Simple,0,0,0.00
+Mut,VND,0,0,0.00
