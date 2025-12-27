@@ -18,7 +18,7 @@
 
 namespace LcVRPContest {
 
-    enum class INITIALIZATION_TYPE { RANDOM, CHUNKED, RR };
+    enum class INITIALIZATION_TYPE { RANDOM, CHUNKED, RR , SMART_STICKY};
 
     class Island {
     public:

@@ -170,6 +170,99 @@ void Island::InitIndividual(Individual& indiv, INITIALIZATION_TYPE strategy) {
             }
             return;
         }
+        else if (strategy == INITIALIZATION_TYPE::SMART_STICKY) {
+            int num_groups = evaluator_->GetNumGroups();
+            int capacity = evaluator_->GetCapacity();
+            std::vector<int>& genes = indiv.AccessGenotype();
+            const std::vector<int>& perm = evaluator_->GetPermutation();
+            int num_clients = static_cast<int>(genes.size());
+
+            // 1. Obliczamy próg "bliskości" w tej konkretnej permutacji
+            double total_dist = 0.0;
+            for (size_t i = 0; i < perm.size() - 1; ++i) {
+                int u_idx = perm[i] - 1;     // index macierzy
+                int v_idx = perm[i + 1] - 1;
+                // Ignorujemy skoki do/z depotu (jeśli perm zawiera 1)
+                if (u_idx > 0 && v_idx > 0) {
+                    total_dist += evaluator_->GetDist(u_idx, v_idx);
+                }
+            }
+            // Średnia odległość między SĄSIADAMI W PERMUTACJI (nie na mapie)
+            double avg_seq_dist = total_dist / (double)std::max(1, (int)perm.size() - 1);
+
+            // Threshold: Jeśli sąsiedzi są bliżej niż 75% średniej, uznajemy to za "dobry fragment"
+            double sticky_threshold = avg_seq_dist * 0.75;
+
+            // 2. Budujemy trasy
+            std::vector<int> group_loads(num_groups, 0);
+
+            // Zaczynamy od losowej grupy dla pierwszego klienta
+            int current_group = rng_() % num_groups;
+
+            // Iterujemy zgodnie z PERMUTACJĄ (bo to ona narzuca kolejność!)
+            for (size_t i = 0; i < perm.size(); ++i) {
+                int customer_id = perm[i];
+                if (customer_id <= 1) continue; // Depot
+
+                int gene_idx = customer_id - 2; // Mapowanie ID na index genu
+                if (gene_idx < 0 || gene_idx >= num_clients) continue;
+
+                int demand = evaluator_->GetDemand(customer_id);
+                bool keep_same_group = false;
+
+                // Sprawdzamy czy "skleić" z poprzednikiem
+                if (i > 0) {
+                    int prev_id = perm[i - 1];
+                    if (prev_id > 1) {
+                        int u_idx = prev_id - 1;
+                        int v_idx = customer_id - 1;
+                        double dist = evaluator_->GetDist(u_idx, v_idx);
+
+                        // Jeśli są blisko w permutacji, chcemy ich w tej samej grupie
+                        if (dist < sticky_threshold) {
+                            keep_same_group = true;
+                        }
+                    }
+                }
+
+                // Decyzja o zmianie grupy
+                if (keep_same_group) {
+                    // Próbujemy utrzymać grupę, ale sprawdzamy Capacity
+                    if (group_loads[current_group] + demand > capacity) {
+                        // Trudno, musimy zmienić grupę mimo bliskości (przeładowanie)
+                        // Losujemy nową, która ma miejsce
+                        std::vector<int> candidates(num_groups);
+                        std::iota(candidates.begin(), candidates.end(), 0);
+                        std::shuffle(candidates.begin(), candidates.end(), rng_);
+
+                        bool found = false;
+                        for (int g : candidates) {
+                            if (group_loads[g] + demand <= capacity) {
+                                current_group = g;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) current_group = candidates[0]; // Fallback
+                    }
+                }
+                else {
+                    // Odległość duża ("zły fragment") -> Zmieniamy grupę (rozbijamy)
+                    // Tu możemy wylosować zupełnie nową, albo wziąć geometrycznie najbliższą
+                    // Wersja prosta: losowa zmiana (dywersyfikacja)
+                    current_group = rng_() % num_groups;
+
+                    // Wersja mądrzejsza (opcjonalnie): spróbuj znaleźć grupę, 
+                    // której centroid jest blisko tego klienta (zmienna geometry_)
+                    // Ale na etapie initu centroidy są puste, więc losowa jest OK.
+                }
+
+                // Przypisanie
+                genes[gene_idx] = current_group;
+                group_loads[current_group] += demand;
+            }
+            return;
+        }
         else {
             std::uniform_int_distribution<int> dist(0, num_groups - 1);
             for (int i = 0; i < remaining_slots; ++i) {
@@ -209,7 +302,18 @@ void Island::Initialize(INITIALIZATION_TYPE strategy) {
 
     for (int i = 0; i < population_size_ - 1; ++i) {
         Individual indiv(sol_size);
-        InitIndividual(indiv, INITIALIZATION_TYPE::RANDOM);
+        if (i < population_size_ * 0.4) {
+            // 40% populacji: Smart Sticky (szanuj permutację)
+            InitIndividual(indiv, INITIALIZATION_TYPE::SMART_STICKY);
+        }
+        else if (i < population_size_ * 0.6) {
+            // 30% populacji: Chunked (szanuj permutację w blokach, bez patrzenia na dystans)
+            InitIndividual(indiv, INITIALIZATION_TYPE::CHUNKED);
+        }
+        else {
+            // 30% populacji: Random (pełna eksploracja)
+            InitIndividual(indiv, INITIALIZATION_TYPE::RANDOM);
+        }
 
         double fit = SafeEvaluate(indiv);
         indiv.SetFitness(fit);
@@ -256,7 +360,7 @@ void Island::RunGeneration() {
             ApplyMicroSplitMutation(child);
             mutated = true;
         }
-        if (!mutated || d(rng_) < adaptive_mutation_rate_) {
+        if ( d(rng_) < adaptive_mutation_rate_) {
             ApplyMutation(child);
         }
 
@@ -1377,9 +1481,9 @@ void Island::UpdateAdaptiveParameters() {
     double diversity = current_structural_diversity_;
     const double LOW_DIV = 0.01;
     const double HIGH_DIV = 0.15;
-    adaptive_mutation_rate_ = MapRange(diversity, LOW_DIV, HIGH_DIV, 0.8, 0.05);
-    adaptive_vnd_prob_ = MapRange(diversity, LOW_DIV, HIGH_DIV, 0.1, 1.0);
-    adaptive_ruin_chance_ = MapRange(diversity, LOW_DIV, HIGH_DIV, 0.9, 0.1);
+    adaptive_mutation_rate_ = MapRange(diversity, LOW_DIV, HIGH_DIV, 0.6, 0.05);
+    adaptive_vnd_prob_ = MapRange(diversity, LOW_DIV, HIGH_DIV, 0.9, 0.2);
+    adaptive_ruin_chance_ = MapRange(diversity, LOW_DIV, HIGH_DIV, 0.7, 0.1);
 }
 
 #ifdef RESEARCH

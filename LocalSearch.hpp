@@ -33,6 +33,7 @@ namespace LcVRPContest {
 
         std::vector<int> client_indices_;
         std::vector<int> candidate_groups_;
+        double current_penalty_factor_ = 1.0;
 
         bool RunFullVND(Individual& ind, bool allow_swap);
         bool RunDecomposedVND(Individual& ind, bool allow_swap);
@@ -45,5 +46,8 @@ namespace LcVRPContest {
         int FindInsertionIndexBinary(const std::vector<int>& route, int target_rank) const;
         double CalculateRemovalDelta(const std::vector<int>& route, int client_id) const;
         double CalculateInsertionDelta(const std::vector<int>& route, int client_id) const;
+
+        double GetPotentialRouteCost(const std::vector<int>& route, int remove_client_id, int insert_client_id) const;
+        void CalibratePenalty();
     };
 }
