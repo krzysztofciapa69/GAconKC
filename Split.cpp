@@ -199,258 +199,263 @@ SplitResult Split::ReconstructResult(const std::vector<int>& giant_tour) {
     return res;
 }
 
-// --- POPRAWIONA IMPLEMENTACJA ApplyMicroSplit ---
 void Split::ApplyMicroSplit(Individual& indiv, int start_idx, int end_idx, const ProblemGeometry* geometry) {
-std::vector<int>& genes = indiv.AccessGenotype();
-const std::vector<int>& giant_tour = evaluator_->GetPermutation();
-int gt_size = static_cast<int>(giant_tour.size());
-int num_groups = evaluator_->GetNumGroups();
-int capacity = evaluator_->GetCapacity();
+    std::vector<int>& genes = indiv.AccessGenotype();
+    const std::vector<int>& giant_tour = evaluator_->GetPermutation();
+    int gt_size = static_cast<int>(giant_tour.size());
+    int num_groups = evaluator_->GetNumGroups();
+    int capacity = evaluator_->GetCapacity();
 
-if (start_idx < 0 || end_idx >= gt_size || start_idx > end_idx) return;
+    if (start_idx < 0 || end_idx >= gt_size || start_idx > end_idx) return;
 
-int count = end_idx - start_idx + 1;
+    int count = end_idx - start_idx + 1;
 
-// --- 1. ALGORYTM SPLIT (Wyznaczanie optymalnych ciêæ) ---
-// (Bez zmian w logice liczenia V_ i pred_)
-if ((int)D_.size() <= count) {
-    int new_size = count + 100;
-    D_.resize(new_size);
-    Q_.resize(new_size);
-    V_.resize(new_size);
-    pred_.resize(new_size);
-}
-
-D_[0] = 0.0;
-Q_[0] = 0;
-
-for (int i = 1; i <= count; ++i) {
-    int curr_node = giant_tour[start_idx + i - 1];
-    int curr_idx = (curr_node > 1) ? curr_node - 1 : 0;
-
-    double dist = 0.0;
-    if (i > 1) {
-        int prev_node = giant_tour[start_idx + i - 2];
-        int prev_idx = (prev_node > 1) ? prev_node - 1 : 0;
-        dist = evaluator_->GetDist(prev_idx, curr_idx);
+    // --- 1. ALGORYTM SPLIT (Wyznaczanie optymalnych ciêæ wewn¹trz okna) ---
+    // Przygotowanie struktur danych (jeœli trzeba rozszerzyæ wektory)
+    if ((int)D_.size() <= count) {
+        int new_size = count + 100;
+        D_.resize(new_size);
+        Q_.resize(new_size);
+        V_.resize(new_size);
+        pred_.resize(new_size);
     }
 
-    D_[i] = D_[i - 1] + dist;
-    Q_[i] = Q_[i - 1] + evaluator_->GetDemand(curr_node);
-}
+    D_[0] = 0.0;
+    Q_[0] = 0;
 
-std::deque<int> dq;
-dq.push_back(0);
-V_[0] = 0.0;
+    // Obliczanie kumulatywnych dystansów i popytów w oknie
+    for (int i = 1; i <= count; ++i) {
+        int curr_node = giant_tour[start_idx + i - 1];
+        int curr_idx = (curr_node > 1) ? curr_node - 1 : 0; // Uwaga na indeksowanie! (zak³adamy depot=1 w pliku -> 0 w macierzy)
 
-for (int i = 1; i <= count; ++i) {
-    int curr_node = giant_tour[start_idx + i - 1];
-    int curr_idx = (curr_node > 1) ? curr_node - 1 : 0;
-
-    while (!dq.empty() && Q_[i] - Q_[dq.front()] > capacity) {
-        dq.pop_front();
-    }
-
-    if (dq.empty()) {
-        V_[i] = std::numeric_limits<double>::max();
-        continue;
-    }
-
-    int best = dq.front();
-    int start_node = giant_tour[start_idx + best];
-    int s_idx = (start_node > 1) ? start_node - 1 : 0;
-
-    double d_in = evaluator_->GetDist(depot_idx_, s_idx);
-    double d_out = evaluator_->GetDist(curr_idx, depot_idx_);
-    double d_route = D_[i] - D_[best + 1];
-
-    V_[i] = V_[best] + d_in + d_route + d_out;
-    pred_[i] = best;
-
-    if (i < count) {
-        int next_node = giant_tour[start_idx + i];
-        int next_idx = (next_node > 1) ? next_node - 1 : 0;
-        double next_in = evaluator_->GetDist(depot_idx_, next_idx);
-        double val_i = V_[i] - D_[i + 1] + next_in;
-
-        while (!dq.empty()) {
-            int back = dq.back();
-            int back_next = giant_tour[start_idx + back];
-            int back_idx = (back_next > 1) ? back_next - 1 : 0;
-            double back_in = evaluator_->GetDist(depot_idx_, back_idx);
-
-            if (val_i <= V_[back] - D_[back + 1] + back_in) dq.pop_back();
-            else break;
+        double dist = 0.0;
+        if (i > 1) {
+            int prev_node = giant_tour[start_idx + i - 2];
+            int prev_idx = (prev_node > 1) ? prev_node - 1 : 0;
+            dist = evaluator_->GetDist(prev_idx, curr_idx);
         }
-        dq.push_back(i);
+
+        D_[i] = D_[i - 1] + dist;
+        Q_[i] = Q_[i - 1] + evaluator_->GetDemand(curr_node);
     }
-}
 
-if (V_[count] >= std::numeric_limits<double>::max()) return;
+    // Monotonic Queue optimization (Linear Split)
+    std::deque<int> dq;
+    dq.push_back(0);
+    V_[0] = 0.0;
 
-// --- 2. REKONSTRUKCJA SEGMENTÓW ---
-// Zbieramy segmenty do wektora, aby przetwarzaæ je OD LEWEJ DO PRAWEJ.
-// Dziêki temu mo¿emy aktualizowaæ stan 'Predecessor' dla grup na bie¿¹co.
-struct Segment {
-    int start_k; // relative index 1..count
-    int end_k;
-    double demand;
-};
-std::vector<Segment> segments;
-int curr = count;
-while (curr > 0) {
-    int prev = pred_[curr];
-    segments.push_back({ prev + 1, curr, (double)(Q_[curr] - Q_[prev]) });
-    curr = prev;
-}
-std::reverse(segments.begin(), segments.end());
+    for (int i = 1; i <= count; ++i) {
+        int curr_node = giant_tour[start_idx + i - 1];
+        int curr_idx = (curr_node > 1) ? curr_node - 1 : 0;
 
-// --- 3. PRZYGOTOWANIE STANU T£A (Skanowanie Giant Tour) ---
-// Musimy wiedzieæ, co ka¿da grupa ma "przed" oknem i "za" oknem.
-std::vector<int> current_group_loads(num_groups, 0);
+        // Usuwamy z kolejki opcje, które przekraczaj¹ capacity samego segmentu
+        // (Wewnêtrzny podzia³ segmentu musi byæ legalny, ³¹czenie z grupami obs³u¿ymy póŸniej)
+        while (!dq.empty() && Q_[i] - Q_[dq.front()] > capacity) {
+            dq.pop_front();
+        }
 
-// Obliczamy Loady grup pomijaj¹c klientów z okna [start_idx, end_idx]
-for (size_t i = 0; i < giant_tour.size(); ++i) {
-    int c_id = giant_tour[i]; // 1-based or 2-based? Permutation has customer IDs starting from 2 usually.
-    // Assuming giant_tour contains IDs 2..N+1 or similar. Check used in Evaluator.
-    if (c_id <= 1) continue; // Skip Depot if present
+        if (dq.empty()) {
+            V_[i] = std::numeric_limits<double>::max();
+            continue;
+        }
 
-    int gene_idx = c_id - 2;
-    if (gene_idx >= 0 && gene_idx < (int)genes.size()) {
-        int g = genes[gene_idx];
-        if (g >= 0 && g < num_groups) {
-            // Jeœli jesteœmy POZA oknem, dodaj do load.
-            if ((int)i < start_idx || (int)i > end_idx) {
+        int best = dq.front();
+        int start_node = giant_tour[start_idx + best]; // Pierwszy klient segmentu
+        int s_idx = (start_node > 1) ? start_node - 1 : 0;
+
+        double d_in = evaluator_->GetDist(depot_idx_, s_idx);
+        double d_out = evaluator_->GetDist(curr_idx, depot_idx_);
+        double d_route = D_[i] - D_[best + 1]; // Dystans wewn¹trz segmentu
+
+        V_[i] = V_[best] + d_in + d_route + d_out;
+        pred_[i] = best;
+
+        // Aktualizacja kolejki dla nastêpnych iteracji
+        if (i < count) {
+            int next_node = giant_tour[start_idx + i];
+            int next_idx = (next_node > 1) ? next_node - 1 : 0;
+            double next_in = evaluator_->GetDist(depot_idx_, next_idx);
+            double val_i = V_[i] - D_[i + 1] + next_in;
+
+            while (!dq.empty()) {
+                int back = dq.back();
+                // Odtwarzamy next_node dla elementu back
+                int back_next_node_idx = start_idx + back; // Indeks w giant_tour
+                int back_next = giant_tour[back_next_node_idx];
+                int back_idx = (back_next > 1) ? back_next - 1 : 0;
+                double back_in = evaluator_->GetDist(depot_idx_, back_idx);
+
+                if (val_i <= V_[back] - D_[back + 1] + back_in) dq.pop_back();
+                else break;
+            }
+            dq.push_back(i);
+        }
+    }
+
+    if (V_[count] >= std::numeric_limits<double>::max()) return;
+
+    // --- 2. REKONSTRUKCJA SEGMENTÓW ---
+    struct Segment {
+        int start_k; // relative index 1..count
+        int end_k;
+        double demand;
+    };
+    std::vector<Segment> segments;
+    int curr = count;
+    while (curr > 0) {
+        int prev = pred_[curr];
+        segments.push_back({ prev + 1, curr, (double)(Q_[curr] - Q_[prev]) });
+        curr = prev;
+    }
+    std::reverse(segments.begin(), segments.end());
+
+    // --- 3. PRZYGOTOWANIE STANU T£A ---
+    std::vector<int> current_group_loads(num_groups, 0);
+
+    // Sumujemy load dla klientów POZA oknem
+    for (size_t i = 0; i < giant_tour.size(); ++i) {
+        if ((int)i >= start_idx && (int)i <= end_idx) continue; // Pomiñ okno
+
+        int c_id = giant_tour[i];
+        if (c_id <= 1) continue; // Pomiñ depot
+
+        int gene_idx = c_id - 2; // Mapowanie ID -> Gene Index
+        if (gene_idx >= 0 && gene_idx < (int)genes.size()) {
+            int g = genes[gene_idx];
+            if (g >= 0 && g < num_groups) {
                 current_group_loads[g] += evaluator_->GetDemand(c_id);
             }
         }
     }
-}
 
-// ZnajdŸ poprzedników (Last node visited by group before window)
-std::vector<int> group_prev(num_groups, depot_idx_); // Default to depot index
-std::vector<bool> g_found(num_groups, false);
-int found_cnt = 0;
-
-for (int k = start_idx - 1; k >= 0; --k) {
-    int c_id = giant_tour[k];
-    if (c_id <= 1) continue;
-    int g = genes[c_id - 2];
-    if (g >= 0 && g < num_groups && !g_found[g]) {
-        group_prev[g] = c_id - 1; // matrix index
-        g_found[g] = true;
-        found_cnt++;
-        if (found_cnt == num_groups) break;
+    // ZnajdŸ 'prev' (ostatni wêze³ przed oknem) dla ka¿dej grupy
+    std::vector<int> group_prev(num_groups, depot_idx_);
+    std::vector<bool> g_found(num_groups, false);
+    int found_cnt = 0;
+    for (int k = start_idx - 1; k >= 0; --k) {
+        int c_id = giant_tour[k];
+        if (c_id <= 1) continue;
+        int g = genes[c_id - 2];
+        if (g >= 0 && g < num_groups && !g_found[g]) {
+            group_prev[g] = c_id - 1; // matrix index
+            g_found[g] = true;
+            found_cnt++;
+            if (found_cnt == num_groups) break;
+        }
     }
-}
 
-// ZnajdŸ nastêpników (First node visited by group after window)
-std::vector<int> group_next(num_groups, depot_idx_); // Default to depot index
-std::fill(g_found.begin(), g_found.end(), false);
-found_cnt = 0;
-
-for (int k = end_idx + 1; k < gt_size; ++k) {
-    int c_id = giant_tour[k];
-    if (c_id <= 1) continue;
-    int g = genes[c_id - 2];
-    if (g >= 0 && g < num_groups && !g_found[g]) {
-        group_next[g] = c_id - 1; // matrix index
-        g_found[g] = true;
-        found_cnt++;
-        if (found_cnt == num_groups) break;
+    // ZnajdŸ 'next' (pierwszy wêze³ za oknem) dla ka¿dej grupy
+    std::vector<int> group_next(num_groups, depot_idx_);
+    std::fill(g_found.begin(), g_found.end(), false);
+    found_cnt = 0;
+    for (int k = end_idx + 1; k < gt_size; ++k) {
+        int c_id = giant_tour[k];
+        if (c_id <= 1) continue;
+        int g = genes[c_id - 2];
+        if (g >= 0 && g < num_groups && !g_found[g]) {
+            group_next[g] = c_id - 1; // matrix index
+            g_found[g] = true;
+            found_cnt++;
+            if (found_cnt == num_groups) break;
+        }
     }
-}
 
-// --- 4. INTELIGENTNE PRZYPISYWANIE (Matching Cost + Capacity) ---
-for (const auto& seg : segments) {
-    // Indeksy globalne w giant_tour
-    int seg_start_idx = start_idx + seg.start_k - 1;
-    int seg_end_idx = start_idx + seg.end_k - 1;
+    // --- 4. INTELIGENTNE PRZYPISYWANIE Z OBS£UG¥ PENALTY ---
+    for (const auto& seg : segments) {
+        int seg_start_idx = start_idx + seg.start_k - 1;
+        int seg_end_idx = start_idx + seg.end_k - 1;
 
-    int node_start_id = giant_tour[seg_start_idx];
-    int node_end_id = giant_tour[seg_end_idx];
+        int node_start_id = giant_tour[seg_start_idx];
+        int node_end_id = giant_tour[seg_end_idx];
 
-    int idx_start = node_start_id - 1;
-    int idx_end = node_end_id - 1;
+        int idx_start = (node_start_id > 1) ? node_start_id - 1 : 0;
+        int idx_end = (node_end_id > 1) ? node_end_id - 1 : 0;
 
-    // Opcjonalne g³osy jako Tie-Breaker
-    std::vector<int> votes(num_groups, 0);
-    if (geometry) {
-        for (int k = seg.start_k; k <= seg.end_k; ++k) {
-            int c_id = giant_tour[start_idx + k - 1];
-            int gene_idx = c_id - 2;
-            if (gene_idx >= 0) {
-                for (int neighbor : geometry->GetNeighbors(gene_idx)) {
-                    if (neighbor < (int)genes.size()) {
-                        int ng = genes[neighbor];
-                        if (ng >= 0 && ng < num_groups) votes[ng]++;
+        // G³osy (Tie-Breaker)
+        std::vector<int> votes(num_groups, 0);
+        if (geometry) {
+            for (int k = seg.start_k; k <= seg.end_k; ++k) {
+                int c_id = giant_tour[start_idx + k - 1];
+                int gene_idx = c_id - 2;
+                if (gene_idx >= 0) {
+                    for (int neighbor : geometry->GetNeighbors(gene_idx)) {
+                        if (neighbor < (int)genes.size()) {
+                            int ng = genes[neighbor];
+                            if (ng >= 0 && ng < num_groups) votes[ng]++;
+                        }
                     }
                 }
             }
         }
-    }
 
-    double best_cost_delta = std::numeric_limits<double>::max();
-    int best_g = -1;
+        double best_delta = std::numeric_limits<double>::max();
+        int best_g = -1;
 
-    // Szukamy najlepszej grupy
-    for (int g = 0; g < num_groups; ++g) {
-        double load_after = current_group_loads[g] + seg.demand;
-        bool fits = (load_after <= capacity);
-
-        // Jeœli nie mieœci siê w capacity, ignorujemy (chyba ¿e nikt siê nie mieœci, wtedy fallback)
-        if (!fits) continue;
-
-        // Kalkulacja Delty Kosztu
-        // Stare po³¹czenie: Prev -> Next
-        // Nowe po³¹czenie: Prev -> [Start ... End] -> Next
-        int p_idx = group_prev[g];
-        int n_idx = group_next[g];
-
-        double d_old = evaluator_->GetDist(p_idx, n_idx);
-        double d_new = evaluator_->GetDist(p_idx, idx_start) + evaluator_->GetDist(idx_end, n_idx);
-
-        double delta = d_new - d_old;
-
-        // Tie-breaker (bonus za g³osy)
-        delta -= (votes[g] * 0.1);
-
-        if (delta < best_cost_delta) {
-            best_cost_delta = delta;
-            best_g = g;
-        }
-    }
-
-    // Fallback: Jeœli ¿adna grupa nie ma miejsca, wybierz tê z najmniejszym przeci¹¿eniem
-    if (best_g == -1) {
-        double min_overload = std::numeric_limits<double>::max();
+        // G³ówna pêtla decyzyjna
         for (int g = 0; g < num_groups; ++g) {
-            double overload = (current_group_loads[g] + seg.demand) - capacity;
-            // Preferujemy te¿ mniejszy koszt przy podobnym overloadzie
-            if (overload < min_overload) {
-                min_overload = overload;
+            // Czy segment mieœci siê w capacity?
+            double load_after = current_group_loads[g] + seg.demand;
+            bool fits = (load_after <= capacity);
+
+            int p_idx = group_prev[g];
+            int n_idx = group_next[g];
+
+            // 1. Obliczamy bazowy koszt (Base Delta)
+            // Zak³adamy na chwilê, ¿e wstawiamy segment "na czysto"
+            // Delta = (Nowa Droga) - (Stara Droga)
+
+            // Stara droga: Prev -> Next
+            double d_old = 0.0;
+            // Jeœli oba koñce to depot, to znaczy ¿e grupa by³a "pusta" w tym rejonie -> dystans 0
+            if (p_idx != depot_idx_ || n_idx != depot_idx_) {
+                d_old = evaluator_->GetDist(p_idx, n_idx);
+            }
+
+            // Koszt dojazdu do pocz¹tku segmentu (bez powrotu)
+            double cost_to_start = evaluator_->GetDist(p_idx, idx_start);
+
+            // 2. Obs³uga PENALTY (Symulacja Ewaluatora)
+            // Jeœli siê nie mieœci, Ewaluator wymusi powrót do bazy przed segmentem.
+            if (!fits) {
+                // Symulujemy: Prev -> Depot -> Start
+                double dist_via_depot = evaluator_->GetDist(p_idx, depot_idx_) +
+                    evaluator_->GetDist(depot_idx_, idx_start);
+
+                // Koszt dojazdu to teraz droga przez bazê
+                cost_to_start = dist_via_depot;
+            }
+
+            // Nowa droga: (Prev -> [Depot?] -> Start) ... End -> Next
+            double d_new = cost_to_start + evaluator_->GetDist(idx_end, n_idx);
+
+            double delta = d_new - d_old;
+
+            // Tie-breaker: promujemy grupy, które maj¹ bliskich s¹siadów (zmniejszamy deltê)
+            delta -= (votes[g] * 0.1);
+
+            if (delta < best_delta) {
+                best_delta = delta;
                 best_g = g;
             }
         }
-    }
 
-    // Przypisz segment
-    if (best_g != -1) {
-        // Aktualizujemy stan grupy
-        current_group_loads[best_g] += (int)seg.demand;
+        // --- Aplikacja wyboru ---
+        // (Poniewa¿ usunêliœmy 'continue', best_g ZAWSZE bêdzie ustawiony, chyba ¿e num_groups=0)
+        if (best_g != -1) {
+            current_group_loads[best_g] += (int)seg.demand;
 
-        // KLUCZOWE: Koniec tego segmentu staje siê nowym "Prev" dla tej grupy
-        // (dla ewentualnych kolejnych segmentów w tym oknie)
-        group_prev[best_g] = idx_end;
+            // Koniec tego segmentu staje siê nowym "Prev" dla tej grupy
+            // (dla nastêpnych segmentów w tym oknie)
+            group_prev[best_g] = idx_end;
 
-        // Zapis do genotypu
-        for (int k = seg.start_k; k <= seg.end_k; ++k) {
-            int c_id = giant_tour[start_idx + k - 1];
-            int gene_idx = c_id - 2;
-            if (gene_idx >= 0 && gene_idx < (int)genes.size()) {
-                genes[gene_idx] = best_g;
+            // Zapisz wynik w genotypie
+            for (int k = seg.start_k; k <= seg.end_k; ++k) {
+                int c_id = giant_tour[start_idx + k - 1];
+                int gene_idx = c_id - 2;
+                if (gene_idx >= 0 && gene_idx < (int)genes.size()) {
+                    genes[gene_idx] = best_g;
+                }
             }
         }
     }
-}
 }

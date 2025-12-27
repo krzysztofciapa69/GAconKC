@@ -60,8 +60,6 @@ namespace LcVRPContest {
 
 
     bool Individual::operator<(const Individual& other) const {
-        if (GetReturnCount() == 0 && other.GetReturnCount() > 0) return true;
-        if (GetReturnCount() > 0 && other.GetReturnCount() == 0) return false;
         return GetFitness() < other.GetFitness();
     }
 }

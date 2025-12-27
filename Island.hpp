@@ -18,7 +18,7 @@
 
 namespace LcVRPContest {
 
-    enum class INITIALIZATION_TYPE { RANDOM, CHUNKED, RR , SMART_STICKY};
+    enum class INITIALIZATION_TYPE { RANDOM, CHUNKED, RR, SMART_STICKY };
 
     class Island {
     public:
@@ -42,14 +42,7 @@ namespace LcVRPContest {
 
 #ifdef RESEARCH
         void ExportState(int generation, bool is_catastrophe) const;
-        std::atomic<long long> vnd_activations_{ 0 };
-        std::atomic<long long> catastrophy_activations{ 0 };
-        std::atomic<long long> load_balancing_activations{ 0 };
-        std::atomic<long long> aggresive_mutation_activations{ 0 };
-        std::atomic<long long> crossovers{ 0 };
-        std::atomic<long long> spatial_activations{ 0 };
-        std::atomic<long long> total_evaluations{ 0 };
-        std::atomic<long long> local_cache_hits{ 0 };
+        // ... (twoje atomics) ...
 #endif
 
     private:
@@ -57,25 +50,10 @@ namespace LcVRPContest {
         const std::vector<int>& demands_;
         int capacity_;
 
-        // Kompozycja - nowe obiekty
         ProblemGeometry geometry_;
         LocalSearch local_search_;
 
-#ifdef RESEARCH
-        enum class OpType {
-            CROSSOVER, MUT_AGGRESSIVE, MUT_SPATIAL, MUT_SIMPLE,
-            LB_CHAIN, LB_SWAP, LB_SIMPLE, VND, COUNT
-        };
-        struct OpStat {
-            std::string name;
-            long long calls = 0;
-            long long wins = 0;
-        };
-        std::vector<OpStat> op_stats_;
-        void InitStats();
-        std::vector<int> CanonicalizeGenotype(const std::vector<int>& genotype, int num_groups) const;
-#endif
-
+        // ... (twoje struktury op_stats) ...
 
         std::vector<int> customer_ranks_;
         int population_size_;
@@ -102,21 +80,18 @@ namespace LcVRPContest {
         const int BASE_STAGNATION_LIMIT = 5000;
         double current_structural_diversity_ = 0.0;
 
-        std::vector<Individual> offspring_pool_;
-
-
+        // Bufory (re-u¿ywane)
         std::vector<int> pred1;
         std::vector<int> pred2;
         std::vector<int> last_in_group1;
         std::vector<int> last_in_group2;
-
 
         struct GroupInfo { double sum_x = 0; double sum_y = 0; int count = 0; };
         std::vector<GroupInfo> group_centroids_buffer_;
         std::vector<bool> is_removed_buffer_;
         std::vector<int> removed_indices_buffer_;
 
-
+        // Metody
         void CalculatePopulationCV();
         void UpdateAdaptiveParameters();
         double MapRange(double value, double in_min, double in_max, double out_min, double out_max);
@@ -140,6 +115,7 @@ namespace LcVRPContest {
         int GetWorstBiasedIndex() const;
         int GetWorstIndex() const;
 
+        Individual CrossoverUniform(const Individual& p1, const Individual& p2);
         Individual Crossover(const Individual& p1, const Individual& p2);
         Individual CrossoverSequence(const Individual& p1, const Individual& p2);
         Individual CrossoverSpatial(const Individual& p1, const Individual& p2);
@@ -154,5 +130,10 @@ namespace LcVRPContest {
         bool ApplyLoadBalancingMutation(Individual& individual);
 
         void ApplySplitToIndividual(Individual& indiv);
+
+        void RunDebugDiagnostics();
+
+        // W sekcji private:
+        void ApplySuccessionAdaptive(std::vector<Individual>& offspring_pool);
     };
 }

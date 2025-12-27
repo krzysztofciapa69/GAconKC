@@ -156,7 +156,7 @@ int main() {
 	bool use_random_permutation = true;
 
 
-	std::cout << "ul";
+	std::cout << "ulaaaaaa";
 	StartOptimization("Vrp-Set-D", "ORTEC-n323-k21", use_random_permutation);
 	
 	return 0;

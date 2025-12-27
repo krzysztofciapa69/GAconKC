@@ -8,9 +8,26 @@
 #include <iomanip>
 #include <fstream>
 #include <cmath>
+#include <unordered_set>
 
+
+#include <cstdint>
 using namespace LcVRPContest;
 using namespace std;
+
+static inline uint64_t HashGenotype64(const std::vector<int>& g) {
+    uint64_t h = 1469598103934665603ULL;
+    for (int x : g) {
+        uint32_t v = static_cast<uint32_t>(x);
+        h ^= (v & 0xFFu);        h *= 1099511628211ULL;
+        h ^= ((v >> 8) & 0xFFu); h *= 1099511628211ULL;
+        h ^= ((v >> 16) & 0xFFu); h *= 1099511628211ULL;
+        h ^= ((v >> 24) & 0xFFu); h *= 1099511628211ULL;
+    }
+    h ^= static_cast<uint64_t>(g.size()) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return h;
+}
+
 
 Island::Island(ThreadSafeEvaluator* evaluator, const ProblemData& data, int population_size, int id)
     : evaluator_(evaluator),
@@ -190,8 +207,8 @@ void Island::InitIndividual(Individual& indiv, INITIALIZATION_TYPE strategy) {
             // Średnia odległość między SĄSIADAMI W PERMUTACJI (nie na mapie)
             double avg_seq_dist = total_dist / (double)std::max(1, (int)perm.size() - 1);
 
-            // Threshold: Jeśli sąsiedzi są bliżej niż 75% średniej, uznajemy to za "dobry fragment"
-            double sticky_threshold = avg_seq_dist * 0.75;
+            double random_factor = std::uniform_real_distribution<double>(0.5, 1.0)(rng_);
+            double sticky_threshold = avg_seq_dist * random_factor;
 
             // 2. Budujemy trasy
             std::vector<int> group_loads(num_groups, 0);
@@ -326,14 +343,30 @@ void Island::Initialize(INITIALIZATION_TYPE strategy) {
     UpdateBiasedFitness();
 }
 
+// ... (reszta include'ów i HashGenotype64 na górze) ...
+
 void Island::RunGeneration() {
     current_generation_++;
     UpdateAdaptiveParameters();
     stagnation_count_++;
 
+    if (current_generation_ == 1 || current_generation_ % 50 == 0) {
+        // RunDebugDiagnostics(); 
+    }
+
     const int lambda = Config::ISLAND_POPULATION_SIZE;
     std::vector<Individual> offspring_pool;
     offspring_pool.reserve(lambda);
+
+    // --- PRZYGOTOWANIE HASZY POPULACJI RODZICIELSKIEJ ---
+    std::unordered_set<uint64_t> population_hashes;
+    population_hashes.reserve(population_.size() * 2);
+    for (const auto& ind : population_) {
+        population_hashes.insert(HashGenotype64(ind.GetGenotype()));
+    }
+
+    std::unordered_set<uint64_t> offspring_hashes;
+    offspring_hashes.reserve(lambda * 2);
 
     double fitness_threshold = std::numeric_limits<double>::max();
     if (!population_.empty()) {
@@ -345,308 +378,234 @@ void Island::RunGeneration() {
     for (int i = 0; i < lambda; ++i) {
         Individual child(evaluator_->GetSolutionSize());
 
+        // --- 1. SELEKCJA ---
         int p1 = SelectParentIndex();
         int p2 = SelectParentIndex();
 
-        if (p1 >= 0 && p2 >= 0) {
-            child = Crossover(population_[p1], population_[p2]);
-        }
-        else {
-            InitIndividual(child, INITIALIZATION_TYPE::RANDOM);
-        }
+        if (p1 >= 0 && p2 >= 0) child = Crossover(population_[p1], population_[p2]);
+        else InitIndividual(child, INITIALIZATION_TYPE::RANDOM);
 
+        // --- 2. MUTACJE ---
         bool mutated = false;
+        bool strong_mutation = false;
+
         if (d(rng_) < Config::MICROSPLITCHANCE) {
             ApplyMicroSplitMutation(child);
+            strong_mutation = true;
             mutated = true;
         }
-        if ( d(rng_) < adaptive_mutation_rate_) {
+
+        if (d(rng_) < adaptive_mutation_rate_) {
             ApplyMutation(child);
+            mutated = true;
         }
 
         if (d(rng_) < Config::LOADBALANCECHANCE) {
-            if (!ApplyLoadBalancingChainMutation(child)) {
+            if (!ApplyLoadBalancingChainMutation(child))
                 ApplyLoadBalancingSwapMutation(child);
-            }
+            mutated = true;
         }
 
+        // --- 3. OCENA POŚREDNIA ---
         child.Canonicalize();
 
-        double current_fit = 0.0;
-        int returns = 0;
-
-        if (!local_cache_.TryGet(child.GetGenotype(), current_fit, returns)) {
-            EvaluationResult result = evaluator_->EvaluateWithStats(child.GetGenotype());
-            current_fit = result.fitness;
-            returns = result.returns;
-            local_cache_.Insert(child.GetGenotype(), current_fit, returns);
+        double fit = 0; int ret = 0;
+        if (!local_cache_.TryGet(child.GetGenotype(), fit, ret)) {
+            EvaluationResult res = evaluator_->EvaluateWithStats(child.GetGenotype());
+            fit = res.fitness; ret = res.returns;
+            local_cache_.Insert(child.GetGenotype(), fit, ret);
         }
-        child.SetFitness(current_fit);
-        child.SetReturnCount(returns);
+        child.SetFitness(fit); child.SetReturnCount(ret);
 
-        bool is_promising = (current_fit < fitness_threshold);
-        bool lucky_shot = (d(rng_) < adaptive_vnd_prob_);
+        // --- 4. VND ---
+        bool promising = (fit < fitness_threshold);
+        bool lucky = (d(rng_) < adaptive_vnd_prob_);
 
-        if (is_promising || lucky_shot) {
-            // TU ZMIANA: u¿ycie local_search_
+        if (strong_mutation || promising || lucky) {
             if (local_search_.RunVND(child)) {
                 child.Canonicalize();
-                if (!local_cache_.TryGet(child.GetGenotype(), current_fit, returns)) {
-                    EvaluationResult result = evaluator_->EvaluateWithStats(child.GetGenotype());
-                    current_fit = result.fitness;
-                    returns = result.returns;
-                    local_cache_.Insert(child.GetGenotype(), current_fit, returns);
+                if (!local_cache_.TryGet(child.GetGenotype(), fit, ret)) {
+                    EvaluationResult res = evaluator_->EvaluateWithStats(child.GetGenotype());
+                    fit = res.fitness; ret = res.returns;
+                    local_cache_.Insert(child.GetGenotype(), fit, ret);
                 }
-                child.SetFitness(current_fit);
-                child.SetReturnCount(returns);
+                child.SetFitness(fit); child.SetReturnCount(ret);
             }
         }
 
-        bool is_duplicate = false;
-        const double EPSILON = 1e-6;
+        // --- 5. SZYBKA DEDUPLIKACJA (HASH) ---
+        uint64_t child_hash = HashGenotype64(child.GetGenotype());
 
-        for (const auto& existing : population_) {
-            if (std::abs(existing.GetFitness() - child.GetFitness()) < EPSILON) {
-                if (existing.GetGenotype() == child.GetGenotype()) {
-                    is_duplicate = true;
-                    break;
-                }
-            }
-        }
+        // A. Czy istnieje w starej populacji?
+        if (population_hashes.find(child_hash) != population_hashes.end()) continue;
 
-        if (!is_duplicate) {
-            for (const auto& existing : offspring_pool) {
-                if (std::abs(existing.GetFitness() - child.GetFitness()) < EPSILON) {
-                    if (existing.GetGenotype() == child.GetGenotype()) {
-                        is_duplicate = true;
-                        break;
-                    }
-                }
-            }
-        }
+        // B. Czy istnieje w puli dzieci?
+        if (offspring_hashes.find(child_hash) != offspring_hashes.end()) continue;
 
-        if (!is_duplicate) {
-            offspring_pool.push_back(std::move(child));
+        // Unikalny - dodajemy!
+        offspring_hashes.insert(child_hash);
+        offspring_pool.push_back(std::move(child));
 
-            if (current_fit < current_best_.GetFitness()) {
-                current_best_ = offspring_pool.back();
-                stagnation_count_ = 0;
-                local_cache_.UpdateHistory(current_best_.GetGenotype());
-                last_improvement_gen_ = current_generation_;
-                fitness_threshold = current_fit * 1.05;
-            }
+        // Elityzm / Update Best
+        if (fit < current_best_.GetFitness()) {
+            current_best_ = offspring_pool.back();
+            stagnation_count_ = 0;
+            local_cache_.UpdateHistory(current_best_.GetGenotype());
+            last_improvement_gen_ = current_generation_;
+            fitness_threshold = fit * 1.05;
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(population_mutex_);
+    // --- 6. SUKCESJA (NOWA BIASED) ---
+    // Tu wywołujemy metodę, którą zdefiniowałeś na końcu pliku.
+    ApplySuccessionAdaptive(offspring_pool);
 
-        population_.insert(population_.end(),
-            std::make_move_iterator(offspring_pool.begin()),
-            std::make_move_iterator(offspring_pool.end()));
-
-        std::sort(population_.begin(), population_.end(), [](const Individual& a, const Individual& b) {
-            return a.GetFitness() < b.GetFitness();
-            });
-
-        if ((int)population_.size() > population_size_) {
-            population_.resize(population_size_);
-        }
-        UpdateBiasedFitness();
-    }
-
-    long long time_since_imp = current_generation_ - last_improvement_gen_;
-    if (time_since_imp > BASE_STAGNATION_LIMIT && current_cv_ < 0.005) {
+    // --- 7. KATASTROFA ---
+    long long time_since = current_generation_ - last_improvement_gen_;
+    if (time_since > BASE_STAGNATION_LIMIT && current_cv_ < 0.005) {
         Catastrophy();
         last_catastrophy_gen_ = current_generation_;
     }
 }
 
-/*
-long long total_improved = 0;
-void Island::RunGeneration() {
-    // ==================================================================================
-    //                                  DEBUG CONFIGURATION
-    // Ustaw na TRUE tylko jeden (lub wybraną kombinację) modułów, aby go przetestować.
-    // ==================================================================================
+void Island::RunDebugDiagnostics() {
+    std::cout << "\n--- [DIAGNOSTYKA GENERACJI " << current_generation_ << "] ---" << std::endl;
 
-    // 1. Crossover (Krzyżowanie)
-    // Jeśli FALSE: Dziecko jest klonem pierwszego rodzica (P1).
-    const bool ENABLE_CROSSOVER = false;
+    // KONFIGURACJA TESTU
+    const int SAMPLES = 50; // Mniejsza próbka, ale dokładniejsza analiza
 
-    // 2. Mutacje (Wybierz jedną lub żadną)
-    const bool ENABLE_MICRO_SPLIT = true;
-    const bool ENABLE_MUTATION_STD = true; // Standard / Aggressive / Spatial (zależne od logiki w ApplyMutation)
-    const bool ENABLE_LOAD_BALANCE = false; // LB Swap
+    // Liczniki statystyk
+    long long split_attempts = 0, split_success = 0;
+    double split_total_gain = 0.0;
 
-    // 3. Local Search (VND)
-    const bool ENABLE_VND = true;
+    long long vnd_attempts = 0, vnd_success = 0, vnd_failures = 0; // Failure = VND pogorszył wynik!
+    double vnd_total_gain = 0.0;
 
-    // 4. Tryb FORCE (Wymuszenie)
-    // Jeśli TRUE: Ignoruje prawdopodobieństwa (np. 0.1) i wykonuje operację ZAWSZE.
-    // Przydatne, żeby zobaczyć wpływ operatora na KAŻDEGO osobnika.
-    const bool FORCE_EXECUTION = true;
-
-    // 5. Logging (Czy wypisywać delty fitnessu?)
-    const bool VERBOSE_LOG = true;
-    // ==================================================================================
-
-    current_generation_++;
-    stagnation_count_++;
-    UpdateAdaptiveParameters();
-
-    std::vector<Individual> offspring;
-    const int lambda = Config::ISLAND_POPULATION_SIZE;
-    offspring.reserve(lambda);
+    std::vector<Individual> debug_offspring;
+    debug_offspring.reserve(SAMPLES);
 
     std::uniform_real_distribution<double> d(0.0, 1.0);
 
-    // Statystyki dla tego debug-runa
-    double sum_delta = 0.0;
-    int improved_count = 0;
-    int degraded_count = 0;
-
-    for (int i = 0; i < lambda; ++i) {
+    for (int i = 0; i < SAMPLES; ++i) {
         Individual child(evaluator_->GetSolutionSize());
-        double parent_fitness = 0.0;
 
-        // --- A. SELEKCJA I BAZA ---
+        // 1. RODZIC (Baza)
         int p1 = SelectParentIndex();
+        if (p1 < 0) { InitIndividual(child, INITIALIZATION_TYPE::RANDOM); }
+        else { child = population_[p1]; }
 
-        if (ENABLE_CROSSOVER) {
-            int p2 = SelectParentIndex();
-            if (p1 >= 0 && p2 >= 0) {
-                child = Crossover(population_[p1], population_[p2]);
-                // Jako punkt odniesienia bierzemy lepszego rodzica
-                parent_fitness = std::min(population_[p1].GetFitness(), population_[p2].GetFitness());
-            }
-            else {
-                InitIndividual(child, INITIALIZATION_TYPE::RANDOM);
-                parent_fitness = 1e9;
-            }
-        }
-        else {
-            // Brak crossovera -> Klonujemy rodzica P1
-            if (p1 >= 0) {
-                child = population_[p1];
-                parent_fitness = population_[p1].GetFitness();
-            }
-            else {
-                InitIndividual(child, INITIALIZATION_TYPE::RANDOM);
-            }
-        }
-
-        double fit_before_mut = parent_fitness; // Do śledzenia wpływu mutacji
-
-        // --- B. MUTACJE ---
-        bool mutated = false;
-
-        // MicroSplit
-        if (ENABLE_MICRO_SPLIT) {
-            if (FORCE_EXECUTION || d(rng_) < Config::MICROSPLITCHANCE) {
-                ApplyMicroSplitMutation(child);
-                mutated = true;
-            }
-        }
-
-        // Standard Mutation (Spatial / Aggressive / Smart)
-        if (ENABLE_MUTATION_STD) {
-            if (FORCE_EXECUTION || d(rng_) < adaptive_mutation_rate_) {
-                // Tu możesz też na sztywno wpisać np. ApplySmartSpatialMove(child)
-                // jeśli chcesz testować konkretną metodę z ApplyMutation
-                ApplyMutation(child);
-                mutated = true;
-            }
-        }
-
-        // Load Balancing
-        if (ENABLE_LOAD_BALANCE) {
-            if (FORCE_EXECUTION || d(rng_) < Config::LOADBALANCECHANCE) {
-                ApplyLoadBalancingSwapMutation(child);
-                mutated = true;
-            }
-        }
-
-        // --- C. EWALUACJA PO MUTACJACH ---
+        // Obliczamy fitness startowy (PEWNY)
         child.Canonicalize();
-        double fit_after_mut = SafeEvaluate(child);
-        child.SetFitness(fit_after_mut);
+        double fit_start = SafeEvaluate(child);
+        child.SetFitness(fit_start);
 
-        // --- D. LOCAL SEARCH (VND) ---
-        if (ENABLE_VND) {
-            // W trybie debug zazwyczaj chcemy widzieć jak VND działa na wszystko
-            // ale możesz odkomentować warunek "is_promising"
-            bool run_vnd = FORCE_EXECUTION;
-            if (!FORCE_EXECUTION) {
-                double median_fit = population_.empty() ? 1e9 : population_[population_.size() / 2].GetFitness();
-                run_vnd = (fit_after_mut < median_fit) || (d(rng_) < adaptive_vnd_prob_);
+        // =================================================================
+        // ETAP 1: MUTACJA (MicroSplit)
+        // =================================================================
+        double fit_after_split = fit_start;
+        bool split_applied = false;
+
+        // Wymuszamy próbę (FORCE) żeby sprawdzić czy w ogóle działa
+        Individual split_candidate = child;
+        ApplyMicroSplitMutation(split_candidate);
+
+        // Sprawdzamy czy genotyp się zmienił
+        if (split_candidate.GetGenotype() != child.GetGenotype()) {
+            split_attempts++;
+            split_candidate.Canonicalize();
+            double f = SafeEvaluate(split_candidate);
+
+            double delta = f - fit_start;
+            if (delta < -1e-6) {
+                split_success++;
+                split_total_gain += delta; // ujemne to dobrze
+                // Akceptujemy zmianę do dalszych testów
+                child = split_candidate;
+                fit_after_split = f;
+                child.SetFitness(f);
+                split_applied = true;
             }
-
-            if (run_vnd) {
-                if (local_search_.RunVND(child)) {
-                    child.Canonicalize();
-                    double fit_vnd = SafeEvaluate(child);
-                    child.SetFitness(fit_vnd);
-                }
+            else {
+                // Jeśli MicroSplit pogorszył wynik, cofamy zmianę dla czystości testu VND
+                // (Chyba że chcesz testować zdolność VND do naprawy - wtedy zostaw)
+                child = split_candidate;
+                fit_after_split = f;
+                child.SetFitness(f);
             }
         }
 
-        double final_fit = child.GetFitness();
+        // =================================================================
+        // ETAP 2: LOCAL SEARCH (VND)
+        // =================================================================
+        // Uruchamiamy VND ZAWSZE, żeby sprawdzić czy potrafi poprawić
+        double fit_after_vnd = fit_after_split;
 
-        // --- LOGOWANIE WPŁYWU OPERATORÓW ---
-        if (VERBOSE_LOG) {
-            double delta = final_fit - parent_fitness;
-            sum_delta += delta;
-            if (delta < -1e-3) {
-                total_improved++;
-                improved_count++;
-            }// Lepszy (mniejszy koszt)
-            else if (delta > 1e-3) degraded_count++; // Gorszy
+        // Klonujemy przed VND, żeby mieć pewność co wchodzi
+        Individual vnd_candidate = child;
+
+        if (local_search_.RunVND(vnd_candidate)) {
+            vnd_attempts++;
+            vnd_candidate.Canonicalize();
+            double f_vnd = SafeEvaluate(vnd_candidate); // Ostateczna weryfikacja evaluatorem
+
+            double delta_vnd = f_vnd - fit_after_split;
+
+            if (delta_vnd < -1e-6) {
+                vnd_success++;
+                vnd_total_gain += delta_vnd;
+                child = vnd_candidate;
+                fit_after_vnd = f_vnd;
+            }
+            else if (delta_vnd > 1e-3) {
+                // KRYTYCZNY BŁĄD: VND twierdził, że poprawił, a Evaluator mówi, że pogorszył!
+                vnd_failures++;
+                std::cout << " [CRITICAL] VND REGRESSION! Start: " << fit_after_split
+                    << " -> End: " << f_vnd
+                    << " Delta: " << delta_vnd << std::endl;
+            }
         }
 
-        // --- E. ELITYZM ---
-        if (final_fit < current_best_.GetFitness()) {
-            current_best_ = child;
-            stagnation_count_ = 0;
-            local_cache_.UpdateHistory(current_best_.GetGenotype());
-            last_improvement_gen_ = current_generation_;
-            if (VERBOSE_LOG) std::cout << " [!!! NEW BEST !!!] " << final_fit << std::endl;
-        }
-
-        // --- F. DODAWANIE (BEZ SPRAWDZANIA DUPLIKATÓW DLA SZYBKOŚCI DEBUGU) ---
-        offspring.push_back(std::move(child));
+        debug_offspring.push_back(child);
     }
 
-    // --- PODSUMOWANIE GENERACJI DEBUGOWEJ ---
-    if (VERBOSE_LOG && current_generation_ % 10 == 0) {
-        std::cout << "[DEBUG Gen " << current_generation_ << "] "
-            << "Avg Delta: " << (sum_delta / lambda)
-            << " | Improved: " << improved_count
-            << " | Degraded: " << degraded_count
-            << " | Best: " << current_best_.GetFitness()
-            << " | avg improved: "<<(double) total_improved/current_generation_<< std::endl;
+    // --- RAPORTOWANIE ---
+    std::cout << "1. MicroSplit Stats:" << std::endl;
+    std::cout << "   - Modified Genotype: " << split_attempts << "/" << SAMPLES << std::endl;
+    std::cout << "   - Improved Fitness:  " << split_success << " (" << (split_attempts > 0 ? (100.0 * split_success / split_attempts) : 0) << "%)" << std::endl;
+    std::cout << "   - Avg Gain (when imp): " << (split_success > 0 ? split_total_gain / split_success : 0.0) << std::endl;
+
+    std::cout << "2. VND Stats:" << std::endl;
+    std::cout << "   - Improvements Found: " << vnd_success << "/" << SAMPLES << std::endl;
+    std::cout << "   - Avg Gain:           " << (vnd_success > 0 ? vnd_total_gain / vnd_success : 0.0) << std::endl;
+
+    if (vnd_failures > 0) {
+        std::cout << "   - [!!!] LOGIC ERRORS (Worse Score): " << vnd_failures << " (Napraw LocalSearch.cpp!)" << std::endl;
+    }
+    else {
+        std::cout << "   - Logic Errors: 0 (OK)" << std::endl;
     }
 
-    // --- G. SUKCESJA (STANDARD) ---
+    std::cout << "----------------------------------------------\n" << std::endl;
+
+    // Wrzucamy debugowane osobniki do populacji (żeby ewolucja nie stała w miejscu)
     {
         std::lock_guard<std::mutex> lock(population_mutex_);
-        if (!offspring.empty()) {
-            population_.reserve(population_.size() + offspring.size());
-            std::move(offspring.begin(), offspring.end(), std::back_inserter(population_));
-        }
-        UpdateBiasedFitness();
+        for (auto& ind : debug_offspring) population_.push_back(ind);
+
+        // Szybki sort i trim
         std::sort(population_.begin(), population_.end(), [](const Individual& a, const Individual& b) {
-            return a.GetBiasedFitness() < b.GetBiasedFitness();
+            return a.GetFitness() < b.GetFitness(); // Tutaj raw fitness wystarczy
             });
         if ((int)population_.size() > population_size_) {
             population_.resize(population_size_);
         }
+
+        if (!population_.empty() && population_[0].GetFitness() < current_best_.GetFitness()) {
+            current_best_ = population_[0];
+            std::cout << " [DIAG] Znaleziono nowe best podczas diagnostyki: " << current_best_.GetFitness() << std::endl;
+        }
     }
 }
-// --- RESTORED METHODS START HERE ---
-*/
-
-
 void Island::Catastrophy() {
 #ifdef RESEARCH
     catastrophy_activations++;
@@ -917,13 +876,24 @@ bool Island::ApplySmartSpatialMove(Individual& indiv) {
 
 
 int Island::ApplyMicroSplitMutation(Individual& child) {
-    int executed_op = -1;
     int n_perm = (int)evaluator_->GetPermutation().size();
 
-    int min_len = 15;
-    int max_len = std::min(150, std::max(20, n_perm / 5));
+    // ADAPTACJA: Im dłużej stagnujemy, tym większe okno niszczenia
+    // stagnation_count_ rośnie w RunGeneration
+    double stagnation_factor = std::min(1.0, (double)stagnation_count_ / 2000.0);
 
-    std::uniform_int_distribution<int> dist_len(min_len, max_len);
+    int base_min = 15;
+    int base_max = std::max(20, n_perm / 10); // Startujemy od 10% trasy
+
+    // Rozszerzamy zakres w miarę stagnacji (do 40% trasy)
+    int current_max = base_max + (int)((n_perm * 0.3) * stagnation_factor);
+    int current_min = base_min + (int)(20 * stagnation_factor);
+
+    // Safety checks
+    current_max = std::min(current_max, n_perm - 1);
+    current_min = std::min(current_min, current_max - 1);
+
+    std::uniform_int_distribution<int> dist_len(current_min, current_max);
     int window_len = dist_len(rng_);
 
     if (window_len >= n_perm) window_len = n_perm - 1;
@@ -935,9 +905,10 @@ int Island::ApplyMicroSplitMutation(Individual& child) {
     split_.ApplyMicroSplit(child, start_idx, end_idx, &geometry_);
 
 #ifdef RESEARCH
-    executed_op = (int)OpType::MUT_SIMPLE;
+    return (int)OpType::MUT_SIMPLE;
+#else
+    return 0;
 #endif
-    return executed_op;
 }
 
 int Island::ApplyLoadBalancing(Individual& child) {
@@ -1115,15 +1086,43 @@ Individual Island::CrossoverSequence(const Individual& p1, const Individual& p2)
     return child;
 }
 
+Individual Island::CrossoverUniform(const Individual& p1, const Individual& p2) {
+    const std::vector<int>& g1 = p1.GetGenotype();
+    const std::vector<int>& g2 = p2.GetGenotype();
+    int size = static_cast<int>(g1.size());
+
+    Individual child(size);
+    std::vector<int>& child_genes = child.AccessGenotype();
+
+    // Uniform Crossover: Każdy gen (klient) ma 50% szans na pochodzenie od P1 lub P2
+    // To doskonale sprawdza się, gdy pozycja w permutacji jest stała, a zmieniamy tylko ID grupy.
+    for (int i = 0; i < size; ++i) {
+        if (rng_() % 2 == 0) {
+            child_genes[i] = g1[i];
+        }
+        else {
+            child_genes[i] = g2[i];
+        }
+    }
+    return child;
+}
+
 Individual Island::Crossover(const Individual& p1, const Individual& p2) {
 #ifdef RESEARCH
     crossovers++;
 #endif
     std::uniform_real_distribution<double> dist(0.0, 1.0);
-    if (dist(rng_) < Config::CROSSOVERSEQ_PROBABILITY) {
+    double r = dist(rng_);
+
+    if (r < Config::CROSSOVERSEQ_PROBABILITY) {
         return CrossoverSequence(p1, p2);
     }
+    else if (r < 0.5) {
+        // 30% szans (przy SEQ=0.3) na Uniform - nowy operator
+        return CrossoverUniform(p1, p2);
+    }
     else {
+        // 40% szans na Spatial
         return CrossoverSpatial(p1, p2);
     }
 }
@@ -1593,6 +1592,127 @@ int Island::GetWorstIndex() const {
     }
     return idx;
 }
+void Island::ApplySuccessionAdaptive(std::vector<Individual>& offspring_pool) {
+    std::lock_guard<std::mutex> lock(population_mutex_);
+
+    // 1. Merge (łączymy obecną populację z dziećmi)
+    if (!offspring_pool.empty()) {
+        population_.reserve(population_.size() + offspring_pool.size());
+        population_.insert(population_.end(),
+            std::make_move_iterator(offspring_pool.begin()),
+            std::make_move_iterator(offspring_pool.end()));
+        offspring_pool.clear();
+    }
+
+    if (population_.empty()) return;
+
+    // 2. Deduplikacja (zostawiamy tylko unikalne genotypy, biorąc te z lepszym fitness)
+    //    Sortujemy najpierw po fitness, żeby przy duplikacie hashset "zobaczył" pierwszy lepszy (lub gorszy, zależy od logiki)
+    //    Tutaj: sortujemy od najlepszego. Pierwszy wchodzi do setu.
+    std::sort(population_.begin(), population_.end(), [](const Individual& a, const Individual& b) {
+        return a.GetFitness() < b.GetFitness();
+        });
+
+    std::vector<Individual> unique_candidates;
+    unique_candidates.reserve(population_.size());
+    std::unordered_set<uint64_t> used_hashes;
+    used_hashes.reserve(population_.size() * 2);
+
+    for (auto& ind : population_) {
+        uint64_t h = HashGenotype64(ind.GetGenotype());
+        if (used_hashes.find(h) == used_hashes.end()) {
+            used_hashes.insert(h);
+            unique_candidates.push_back(std::move(ind));
+        }
+    }
+
+    // Podmieniamy populację na listę unikalnych kandydatów
+    population_ = std::move(unique_candidates);
+
+    // Jeśli po deduplikacji mamy mniej niż rozmiar populacji, to nic nie ucinamy
+    if ((int)population_.size() <= population_size_) {
+        UpdateBiasedFitness();
+        return;
+    }
+
+    // 3. ADAPTACYJNA DECYZJA O PROPORCJACH
+    // Im wyższe CV (różnorodność), tym więcej "Raw Fitness" (Eksploatacja).
+    // Im niższe CV (stagnacja), tym więcej "Biased Fitness" (Ochrona różnorodności).
+
+    double elite_ratio = 0.5; // Domyślnie pół na pół
+
+    if (current_cv_ > 0.20) {
+        elite_ratio = 0.95; // Super zdrowa populacja -> prawie sama elita
+    }
+    else if (current_cv_ > 0.10) {
+        elite_ratio = 0.80; // Dobra kondycja -> przewaga elity
+    }
+    else if (current_cv_ > 0.05) {
+        elite_ratio = 0.50; // Zaczyna się robić ciasno -> balans
+    }
+    else {
+        elite_ratio = 0.20; // Krytyczna stagnacja -> ratujmy "innych", nawet słabych
+    }
+
+    int elite_count = (int)(population_size_ * elite_ratio);
+    // Zawsze zachowaj przynajmniej 1 elitę i przynajmniej 2 miejsca dla różnorodności
+    elite_count = std::max(1, std::min(population_size_ - 2, elite_count));
+
+    // 4. WYBÓR NOWEJ POPULACJI
+    std::vector<Individual> next_pop;
+    next_pop.reserve(population_size_);
+    std::unordered_set<int> added_indices; // Żeby nie dodać tego samego osobnik 2 razy
+
+    // A. Wybór Elity (Raw Fitness)
+    // population_ jest już posortowana po Raw Fitness (krok 2), więc bierzemy z wierzchu
+    for (int i = 0; i < (int)population_.size(); ++i) {
+        if ((int)next_pop.size() >= elite_count) break;
+        next_pop.push_back(population_[i]);
+        added_indices.insert(i);
+    }
+
+    // B. Wybór Różnorodności (Biased Fitness)
+    // Musimy obliczyć rangi dla całej puli kandydatów
+    UpdateBiasedFitness();
+
+    // Sortujemy indeksy pomocnicze wg Biased Fitness
+    std::vector<int> biased_indices(population_.size());
+    std::iota(biased_indices.begin(), biased_indices.end(), 0);
+
+    std::sort(biased_indices.begin(), biased_indices.end(), [&](int a, int b) {
+        return population_[a].GetBiasedFitness() < population_[b].GetBiasedFitness();
+        });
+
+    // Dobieramy resztę slotów
+    for (int idx : biased_indices) {
+        if ((int)next_pop.size() >= population_size_) break;
+
+        if (added_indices.find(idx) == added_indices.end()) {
+            next_pop.push_back(population_[idx]);
+            added_indices.insert(idx);
+        }
+    }
+
+    // C. Fallback (gdyby coś poszło nie tak, np. błędy zaokrągleń, dobieramy z elity)
+    if ((int)next_pop.size() < population_size_) {
+        for (int i = 0; i < (int)population_.size(); ++i) {
+            if ((int)next_pop.size() >= population_size_) break;
+            if (added_indices.find(i) == added_indices.end()) {
+                next_pop.push_back(population_[i]);
+            }
+        }
+    }
+
+    population_ = std::move(next_pop);
+
+    // Sortujemy końcowo po Raw Fitness dla czytelności i logiki rodziców
+    std::sort(population_.begin(), population_.end(), [](const Individual& a, const Individual& b) {
+        return a.GetFitness() < b.GetFitness();
+        });
+
+    UpdateBiasedFitness();
+}
+
 
 void Island::InjectImmigrant(Individual& imigrant) {
     double fit = SafeEvaluate(imigrant);
@@ -1611,3 +1731,6 @@ void Island::InjectImmigrant(Individual& imigrant) {
         }
     }
 }
+
+
+
