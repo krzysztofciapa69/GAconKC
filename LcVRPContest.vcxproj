@@ -184,10 +184,12 @@
     <ClCompile Include="Island.cpp" />
     <ClCompile Include="LcVRPContest.cpp" />
     <ClCompile Include="LocalSearch.cpp" />
+    <ClCompile Include="Mutator.cpp" />
     <ClCompile Include="Optimizer.cpp" />
     <ClCompile Include="ProblemData.cpp" />
     <ClCompile Include="ProblemGeometry.cpp" />
     <ClCompile Include="ProblemLoader.cpp" />
+    <ClCompile Include="RoutePool.cpp" />
     <ClCompile Include="Split.cpp" />
     <ClCompile Include="ThreadSafeEvaluator.cpp" />
   </ItemGroup>
@@ -198,10 +200,12 @@
     <ClInclude Include="Island.hpp" />
     <ClInclude Include="LocalCache.hpp" />
     <ClInclude Include="LocalSearch.hpp" />
+    <ClInclude Include="Mutator.hpp" />
     <ClInclude Include="Optimizer.hpp" />
     <ClInclude Include="ProblemData.hpp" />
     <ClInclude Include="ProblemGeometry.hpp" />
     <ClInclude Include="ProblemLoader.hpp" />
+    <ClInclude Include="RoutePool.hpp" />
     <ClInclude Include="Split.hpp" />
     <ClInclude Include="ThreadSafeEvaluator.hpp" />
   </ItemGroup>

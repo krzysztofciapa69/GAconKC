@@ -21,6 +21,8 @@ namespace LcVRPContest {
         }
 
         inline const std::vector<int>& GetNeighbors(int index) const {
+            static const std::vector<int> empty;
+            if (index < 0 || index >= (int)neighbors_.size()) return empty;
             return neighbors_[index];
         }
 

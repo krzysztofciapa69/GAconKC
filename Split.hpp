@@ -1,46 +1,56 @@
 #pragma once
-#include <vector>
-#include <deque>
-#include "ThreadSafeEvaluator.hpp"
 #include "Individual.hpp"
+#include "ProblemGeometry.hpp"
+#include "ThreadSafeEvaluator.hpp"
+#include <deque>
+#include <vector>
 
+#include <random>
 
 namespace LcVRPContest {
-    class ProblemGeometry;
-}
 
-namespace LcVRPContest {
+struct SplitResult {
+  bool feasible;
+  double total_cost;
+  std::vector<std::vector<int>> optimized_routes;
+  std::vector<int> group_assignment;
+};
 
-    struct SplitResult {
-        double total_cost;
-        std::vector<std::vector<int>> optimized_routes;
-        std::vector<int> group_assignment;
-        bool feasible;
-    };
+struct Segment {
+  int start_k;
+  int end_k;
+  double demand;
+};
 
-    class Split {
-    public:
-        explicit Split(const ThreadSafeEvaluator* evaluator);
+class Split {
+public:
+  Split(const ThreadSafeEvaluator *evaluator);
 
-        SplitResult RunLinear(const std::vector<int>& giant_tour);
-        SplitResult RunBellman(const std::vector<int>& giant_tour);
+  SplitResult RunLinear(const std::vector<int> &giant_tour);
+  SplitResult RunBellman(const std::vector<int> &giant_tour);
 
-        void ApplyMicroSplit(Individual& indiv, int start_idx, int end_idx, const ProblemGeometry* geometry);
+  void ApplyMicroSplit(Individual &indiv, int start_idx, int end_idx,
+                       const ProblemGeometry *geometry, std::mt19937 &rng);
 
-    private:
-        const ThreadSafeEvaluator* evaluator_;
-        int capacity_;
-        double max_distance_;
-        bool has_distance_constraint_;
-        int depot_idx_;
-        int num_customers_;
+private:
+  const ThreadSafeEvaluator *evaluator_;
+  int capacity_;
+  int depot_idx_;
+  int num_customers_;
 
-        std::vector<double> D_; // cumulated distance
-        std::vector<int> Q_;    // cumulated demand
-        std::vector<double> V_; // cost of the shortest route 
-        std::vector<int> pred_; //predecesors
+  std::vector<double> D_;
+  std::vector<int> Q_;
+  std::vector<double> V_;
+  std::vector<int> pred_;
+  std::deque<int> dq_;
 
-        void PrecomputeStructures(const std::vector<int>& giant_tour);
-        SplitResult ReconstructResult(const std::vector<int>& giant_tour);
-    };
-}
+  std::vector<int> votes_buffer_;
+  std::vector<Segment> segments_buffer_;
+  std::vector<bool> in_window_; // Fix: Member instead of static local
+
+  void ResizeStructures(int size);
+  void PrecomputeStructures(const std::vector<int> &giant_tour);
+  SplitResult ReconstructResult(const std::vector<int> &giant_tour);
+};
+
+} // namespace LcVRPContest

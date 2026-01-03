@@ -115,7 +115,7 @@ void ProblemGeometry::GenerateArtificialCoordinates(ThreadSafeEvaluator* evaluat
     for (int i = 0; i < dim; ++i) artificial_coordinates_[i] = Coordinate(safety_dist(rng_), safety_dist(rng_));
 
     const int RESTARTS = 2;
-    const int ITERATIONS = Config::CORDSITERATIONSMULTIPLIER * coordinates_.size();
+    const int ITERATIONS = Config::CORDSITERATIONSMULTIPLIER * dim;  // Fix: było coordinates_.size()
     double learning_rate = 0.5;
 
     double best_stress = std::numeric_limits<double>::max();

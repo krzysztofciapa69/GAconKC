@@ -1,0 +1,58 @@
+#pragma once
+#include <vector>
+#include <deque>
+#include "ThreadSafeEvaluator.hpp"
+#include "Individual.hpp"
+#include "ProblemGeometry.hpp"
+
+namespace LcVRPContest {
+
+    struct SplitResult {
+        double total_cost;
+        std::vector<std::vector<int>> optimized_routes;
+        std::vector<int> group_assignment;
+        bool feasible;
+    };
+
+    class Split {
+    public:
+        Split(const ThreadSafeEvaluator* evaluator);
+
+        // Metody globalne (u¿ywane np. do inicjalizacji lub pe³nego podzia³u)
+        SplitResult RunLinear(const std::vector<int>& giant_tour);
+        SplitResult RunBellman(const std::vector<int>& giant_tour);
+
+        // Metoda lokalna (MicroSplit) - serce optymalizacji
+        void ApplyMicroSplit(Individual& indiv, int start_idx, int end_idx, const ProblemGeometry* geometry);
+
+    private:
+        const ThreadSafeEvaluator* evaluator_;
+        int capacity_;
+        int depot_idx_;
+        int num_customers_;
+
+        // --- Memory Pool (Pola klasy - unikamy realokacji) ---
+        std::vector<double> D_; // Skumulowany dystans
+        std::vector<int> Q_;    // Skumulowany popyt
+        std::vector<double> V_; // Koszt (Programowanie Dynamiczne)
+        std::vector<int> pred_; // Poprzednicy (do rekonstrukcji)
+
+        // --- Bufory robocze ---
+        std::deque<int> dq_;            // Kolejka monotoniczna (reusable)
+        std::vector<int> votes_buffer_; // Bufor g³osowania na grupy
+
+        struct Segment {
+            int start_k;
+            int end_k;
+            double demand;
+        };
+        std::vector<Segment> segments_buffer_;
+
+        // --- Metody pomocnicze ---
+        void ResizeStructures(int size);
+
+        // Te metody musz¹ byæ zaimplementowane w .cpp, bo s¹ wo³ane przez RunLinear
+        void PrecomputeStructures(const std::vector<int>& giant_tour);
+        SplitResult ReconstructResult(const std::vector<int>& giant_tour);
+    };
+}

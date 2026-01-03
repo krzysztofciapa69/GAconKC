@@ -63,7 +63,7 @@ void StartOptimization(const string& folder_name, const string& instance_name, i
         if (_kbhit()) {             // 1. SprawdŸ, czy coœ wciœniêto (b³yskawiczne)
             char ch = _getch();     // 2. Pobierz ten znak
             if (ch == ' ') {        // 3. Jeœli to spacja...
-                cout << "\n[!] Przerwano recznie spacja." << endl;
+                cout << "\n[!] Przerwano recznie spacja." << "\n";
                 break;              // Wyjdz z petli, kod dalej wykona zapis wynikow
             }
         }
@@ -74,7 +74,7 @@ void StartOptimization(const string& folder_name, const string& instance_name, i
 
 	vector<int>* best_solution = optimizer.GetCurrentBest();
 	double best_fitness = evaluator.Evaluate(*best_solution);
-	cout << "final best fitness: " << best_fitness << endl;
+	cout << "final best fitness: " << best_fitness << "\n";
 }
 
 void StartOptimization(const string& folder_name, const string& instance_name, bool use_random_permutation) {
@@ -93,7 +93,7 @@ void StartOptimization(const string& folder_name, const string& instance_name, b
 #endif
 
 
-    cout << "instance:   " << instance_name << endl;
+    cout << "instance:   " << instance_name << "\n";
     ProblemLoader problem_loader(folder_name, instance_name, use_random_permutation);
     ProblemData problem_data = problem_loader.LoadProblem();
 
@@ -116,12 +116,12 @@ void StartOptimization(const string& folder_name, const string& instance_name, b
 
     auto start_time = std::chrono::high_resolution_clock::now();
     auto duration_limit = std::chrono::seconds(Config::MAX_TIME_SECONDS);
-    cout << problem_data.GetPermutation().size() << " customers" << endl;
+    cout << problem_data.GetPermutation().size() << " customers" << "\n";
     while (std::chrono::high_resolution_clock::now() - start_time < duration_limit) {
         if (_kbhit()) {             // 1. SprawdŸ, czy coœ wciœniêto (b³yskawiczne)
             char ch = _getch();     // 2. Pobierz ten znak
             if (ch == ' ') {        // 3. Jeœli to spacja...
-                cout << "\n[!] Przerwano recznie spacja." << endl;
+                cout << "\n[!] Przerwano recznie spacja." << "\n";
                 break;              // Wyjdz z petli, kod dalej wykona zapis wynikow
             }
         }
@@ -134,13 +134,15 @@ void StartOptimization(const string& folder_name, const string& instance_name, b
 
     vector<int>* best_solution = optimizer.GetCurrentBest();
     double best_fitness = evaluator.Evaluate(*best_solution);
+    std::this_thread::sleep_for(std::chrono::seconds(5));
 
     Individual best_indiv = optimizer.GetBestIndividual();
-    cout << "FINAL RESULT | Fitness: " << fixed << best_fitness << " | Generations: " << optimizer.GetGeneration() << "| test time [s]: " << Config::MAX_TIME_SECONDS << endl;
+    cout << "FINAL RESULT | Fitness: " << fixed << best_fitness << " | Generations: " << optimizer.GetGeneration() << "| test time [s]: " << Config::MAX_TIME_SECONDS << "\n";
     best_indiv.PrintGroups(problem_data.GetPermutation());
 #ifdef RESEARCH
     optimizer.PrintIslandStats();
 #endif
+    
     cout << "Solution: ";
     vector<int> genotype = best_indiv.AccessGenotype();
     for (int gene : genotype) {
@@ -152,12 +154,15 @@ void StartOptimization(const string& folder_name, const string& instance_name, b
 
 } 
 int main() {
+    std::ios_base::sync_with_stdio(false);
+    std::cin.tie(nullptr);
 
 	bool use_random_permutation = true;
 
 
 	std::cout << "ulaaaaaa";
 	StartOptimization("Vrp-Set-D", "ORTEC-n323-k21", use_random_permutation);
-	
+   // StartOptimization("Vrp-Set-XXL", "Leuven2", use_random_permutation);
 	return 0;
 }
+

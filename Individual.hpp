@@ -29,10 +29,16 @@ namespace LcVRPContest {
 
         void Canonicalize();
 
+        // Stagnation tracking for inter-archipelago migration
+        void IncrementStagnation() { stagnation_counter_++; }
+        void ResetStagnation() { stagnation_counter_ = 0; }
+        int GetStagnation() const { return stagnation_counter_; }
+
     private:
         std::vector<int> genotype_;
         double fitness_;
         int return_count_ = 0;
+        int stagnation_counter_ = 0;
         double diversity_score_;
         double biased_fitness_;
         bool is_evaluated_;

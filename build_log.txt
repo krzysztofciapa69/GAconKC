@@ -1,0 +1,122 @@
+﻿Wersja programu MSBuild 17.14.23+b0019275e dla .NET Framework
+Kompilacja rozpocz─Ö┼éa si─Ö 2.01.2026 18:50:05.
+
+Projekt ÔÇ×C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxprojÔÇŁ w w─Ö┼║le 1 (domy┼Ťlne elementy docelowe).
+PrepareForBuild:
+  Tworzenie katalogu ÔÇ×LcVRPContest\Release\ÔÇŁ.
+  Dane wyj┼Ťciowe ze struktur─ů s─ů w┼é─ůczone. Formatowanie diagnostyki kompilatora b─Ödzie odzwierciedla─ç hierarchi─Ö b┼é─Öd├│w. Aby uzyska─ç wi─Öcej informacji, zobacz https://aka.ms/cpp/structured-output.
+  Tworzenie katalogu ÔÇ×C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Release\ÔÇŁ.
+  Tworzenie katalogu ÔÇ×LcVRPContest\Release\LcVRPContest.tlog\ÔÇŁ.
+InitializeBuildStatus:
+  Trwa tworzenie ÔÇ×LcVRPContest\Release\LcVRPContest.tlog\unsuccessfulbuildÔÇŁ, poniewa┼╝ okre┼Ťlono "AlwaysCreate".
+  Modyfikowanie ÔÇ×LcVRPContest\Release\LcVRPContest.tlog\unsuccessfulbuildÔÇŁ.
+ClCompile:
+  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\HostX86\x86\CL.exe /c /Zi /nologo /W3 /WX- /diagnostics:column /sdl /O2 /Oi /Oy- /GL /D WIN32 /D NDEBUG /D _CONSOLE /D _UNICODE /D UNICODE /Gm- /EHsc /MD /GS /Gy /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /permissive- /Fo"LcVRPContest\Release\\" /Fd"LcVRPContest\Release\vc143.pdb" /external:W3 /Gd /TP /analyze- /FC /errorReport:queue Evaluator.cpp Individual.cpp Island.cpp LcVRPContest.cpp LocalSearch.cpp Mutator.cpp Optimizer.cpp ProblemData.cpp ProblemGeometry.cpp ProblemLoader.cpp Archipelago.cpp Split.cpp ThreadSafeEvaluator.cpp
+  Evaluator.cpp
+  Individual.cpp
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Individual.cpp(80,37): warning C4018: "<": niezgodno┼Ť─ç typu ze znakiem/bez znaku [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  Island.cpp
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Island.cpp(246,20): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  LcVRPContest.cpp
+  LocalSearch.cpp
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(69,16): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(353,26): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(354,26): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(522,18): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(543,14): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(592,18): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(609,18): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(647,16): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(770,14): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  Mutator.cpp
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Mutator.cpp(345,18): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Mutator.cpp(373,23): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Mutator.cpp(518,16): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  Optimizer.cpp
+  ProblemData.cpp
+  ProblemGeometry.cpp
+  ProblemLoader.cpp
+  Archipelago.cpp
+  Split.cpp
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244: "=": konwersja z "double" do "_Ty", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244:         with [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244:         [ [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244:             _Ty=int [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244:         ] [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244: "+=": konwersja z "double" do "_Ty", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244:         with [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244:         [ [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244:             _Ty=int [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244:         ] [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244: "=": konwersja z "double" do "_Ty", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244:         with [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244:         [ [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244:             _Ty=int [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244:         ] [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  ThreadSafeEvaluator.cpp
+Link:
+  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\HostX86\x86\link.exe /ERRORREPORT:QUEUE /OUT:"C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Release\LcVRPContest.exe" /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Release\LcVRPContest.pdb" /SUBSYSTEM:CONSOLE /OPT:REF /OPT:ICF /LTCG:incremental /LTCGOUT:"LcVRPContest\Release\LcVRPContest.iobj" /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Release\LcVRPContest.lib" /MACHINE:X86 /SAFESEH LcVRPContest\Release\Evaluator.obj
+  LcVRPContest\Release\Individual.obj
+  LcVRPContest\Release\Island.obj
+  LcVRPContest\Release\LcVRPContest.obj
+  LcVRPContest\Release\LocalSearch.obj
+  LcVRPContest\Release\Mutator.obj
+  LcVRPContest\Release\Optimizer.obj
+  LcVRPContest\Release\ProblemData.obj
+  LcVRPContest\Release\ProblemGeometry.obj
+  LcVRPContest\Release\ProblemLoader.obj
+  LcVRPContest\Release\Archipelago.obj
+  LcVRPContest\Release\Split.obj
+  LcVRPContest\Release\ThreadSafeEvaluator.obj
+Optimizer.obj : error LNK2001: nierozpoznany symbol zewn─Ötrzny "public: unsigned int __thiscall LcVRPContest::RoutePool::GetSize(void)const " (?GetSize@RoutePool@LcVRPContest@@QBEIXZ) [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+Optimizer.obj : error LNK2001: nierozpoznany symbol zewn─Ötrzny "public: class LcVRPContest::Individual __thiscall LcVRPContest::RoutePool::SolveGreedy(class LcVRPContest::ThreadSafeEvaluator *,class LcVRPContest::Split &)" (?SolveGreedy@RoutePool@LcVRPContest@@QAE?AVIndividual@2@PAVThreadSafeEvaluator@2@AAVSplit@2@@Z) [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+Optimizer.obj : error LNK2001: nierozpoznany symbol zewn─Ötrzny "public: void __thiscall LcVRPContest::RoutePool::AddRoutesFromSolution(class std::vector<int,class std::allocator<int> > const &,class LcVRPContest::ThreadSafeEvaluator const &)" (?AddRoutesFromSolution@RoutePool@LcVRPContest@@QAEXABV?$vector@HV?$allocator@H@std@@@std@@ABVThreadSafeEvaluator@2@@Z) [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Release\LcVRPContest.exe : fatal error LNK1120: liczba nierozpoznanych element├│w zewn─Ötrznych: 3 [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+Kompilowanie projektu ÔÇ×C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxprojÔÇŁ wykonane (domy┼Ťlne elementy docelowe) ÔÇö NIEPOWODZENIE.
+
+Kompilacja NIE POWIOD┼üA SI─ś.
+
+ÔÇ×C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxprojÔÇŁ (domy┼Ťlny element docelowy) (1)->
+(element docelowy ClCompile) -> 
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Individual.cpp(80,37): warning C4018: "<": niezgodno┼Ť─ç typu ze znakiem/bez znaku [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Island.cpp(246,20): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(69,16): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(353,26): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(354,26): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(522,18): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(543,14): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(592,18): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(609,18): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(647,16): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LocalSearch.cpp(770,14): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Mutator.cpp(345,18): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Mutator.cpp(373,23): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Mutator.cpp(518,16): warning C4244: "inicjowanie": konwersja z "double" do "int", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244: "=": konwersja z "double" do "_Ty", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244:         with [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244:         [ [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244:             _Ty=int [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(69,23): warning C4244:         ] [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244: "+=": konwersja z "double" do "_Ty", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244:         with [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244:         [ [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244:             _Ty=int [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(178,46): warning C4244:         ] [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244: "=": konwersja z "double" do "_Ty", mo┼╝liwa utrata danych [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244:         with [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244:         [ [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244:             _Ty=int [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Split.cpp(433,23): warning C4244:         ] [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+
+
+ÔÇ×C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxprojÔÇŁ (domy┼Ťlny element docelowy) (1)->
+(element docelowy Link) -> 
+  Optimizer.obj : error LNK2001: nierozpoznany symbol zewn─Ötrzny "public: unsigned int __thiscall LcVRPContest::RoutePool::GetSize(void)const " (?GetSize@RoutePool@LcVRPContest@@QBEIXZ) [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  Optimizer.obj : error LNK2001: nierozpoznany symbol zewn─Ötrzny "public: class LcVRPContest::Individual __thiscall LcVRPContest::RoutePool::SolveGreedy(class LcVRPContest::ThreadSafeEvaluator *,class LcVRPContest::Split &)" (?SolveGreedy@RoutePool@LcVRPContest@@QAE?AVIndividual@2@PAVThreadSafeEvaluator@2@AAVSplit@2@@Z) [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  Optimizer.obj : error LNK2001: nierozpoznany symbol zewn─Ötrzny "public: void __thiscall LcVRPContest::RoutePool::AddRoutesFromSolution(class std::vector<int,class std::allocator<int> > const &,class LcVRPContest::ThreadSafeEvaluator const &)" (?AddRoutesFromSolution@RoutePool@LcVRPContest@@QAEXABV?$vector@HV?$allocator@H@std@@@std@@ABVThreadSafeEvaluator@2@@Z) [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+  C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\Release\LcVRPContest.exe : fatal error LNK1120: liczba nierozpoznanych element├│w zewn─Ötrznych: 3 [C:\Users\krzys\OneDrive\studia\Semestr 3\TEP\konkurs\konkurs\LcVRPContest.vcxproj]
+
+    Ostrze┼╝enia: 17
+    Liczba b┼é─Öd├│w: 4
+
+Czas, kt├│ry up┼éyn─ů┼é: 00:00:31.57
