@@ -2,6 +2,7 @@
 #include "Constants.hpp"
 #include "ProblemGeometry.hpp"
 #include <algorithm>
+#include <numeric>
 #include <cmath>
 #include <deque>
 #include <iostream>
@@ -151,110 +152,131 @@ void Split::ApplyMicroSplit(Individual &indiv, int start_idx, int end_idx,
   }
   // Segments są w kolejności od końca do początku. Iterujemy odwrotnie.
 
-  // 5. SMART SEGMENT ASSIGNMENT (Geometry + Capacity Aware)
+  // 5. SMART SEGMENT ASSIGNMENT (Sequence Cost Aware)
+  // We must assign segments to groups such that the sequence cost is minimized.
+  // Since the global permutation is fixed, the cost of a group G is the sum of distances
+  // between consecutive members of G in the permutation.
+  // So when adding a segment S to G, the cost added is dist(LastMember(G), S.Start).
 
-  // A. Identify which clients are in the window (for load calc)
-  // Use a simpler approach to avoid large boolean allocation if N is large.
-  // For contest N=323 it's tiny.
+  std::vector<int> last_customer_in_group(num_groups, 0); // 0 = depot
+  std::vector<int> group_loads(num_groups, 0);
+
+  // A. Initialize Group States (Scan backward to find last customers)
+  // We need to know who was the last customer for each group before start_idx
+  // to calculate connection costs correctly.
+  int initialized_count = 0;
+  for (int k = start_idx - 1; k >= 0; --k) {
+      if (initialized_count >= num_groups) break; // Optimization
+      int c_id = giant_tour[k];
+      int gene_idx = c_id - 2;
+      if (gene_idx >= 0 && gene_idx < (int)genes.size()) {
+          int g = genes[gene_idx];
+          if (g >= 0 && g < num_groups) {
+              if (last_customer_in_group[g] == 0) {
+                  last_customer_in_group[g] = c_id;
+                  initialized_count++;
+              }
+          }
+      }
+  }
+
+  // B. Calculate initial group loads (excluding window)
+  // Re-calculate strictly for correctness within the window context
+  // Note: For huge instances, scanning whole gene vector is slow. 
+  // But here we rely on incremental updates or outside info?
+  // Let's stick to the previous faster loop which skips window.
   int total_clients = (int)genes.size();
-  // Use member in_window_ to avoid race condition
-  if ((int)in_window_.size() < total_clients)
-    in_window_.resize(total_clients);
-  // Only clear used range if possible? No, we need random access check.
-  // Efficiency note: std::vector<bool> fill is fast (bitset).
-  std::fill(in_window_.begin(), in_window_.end(), false);
-
+  std::vector<bool> in_window(total_clients, false);
   for (int k = 1; k <= count; ++k) {
     int c_id = giant_tour[start_idx + k - 1];
     int gene_idx = c_id - 2;
     if (gene_idx >= 0 && gene_idx < total_clients) {
-      in_window_[gene_idx] = true;
+      in_window[gene_idx] = true;
     }
   }
 
-  // B. Calculate current loads of groups (excluding window clients)
-  std::vector<int> group_loads(num_groups, 0);
   for (int i = 0; i < total_clients; ++i) {
-    if (in_window_[i])
-      continue;
+    if (in_window[i]) continue;
     int g = genes[i];
     if (g >= 0 && g < num_groups) {
       group_loads[g] += evaluator_->GetDemand(i + 2);
     }
   }
 
-  // C. Assign each segment to the best group
+  // C. Assign segments sequentially
+  // Segments are in reverse order in buffer? 
+  // "segments_buffer_.push_back({prev + 1, curr, ...})" -> from right to left
+  // So segments_buffer_[0] is the RIGHTMOST segment.
+  // We need to process from LEFT to RIGHT to maintain sequence logic.
+  
   for (int i = (int)segments_buffer_.size() - 1; i >= 0; --i) {
     const auto &seg = segments_buffer_[i];
-    double seg_load = seg.demand; // cost holds load (casted in push_back)
+    double seg_demand = seg.demand;
 
-    // Gather local votes for this segment
-    std::fill(votes_buffer_.begin(), votes_buffer_.end(), 0);
+    // Identify start and end nodes of the segment
+    // giant_tour indices are relative to start_idx in Apply logic?
+    // giant_tour[start_idx + k - 1]
+    int start_node_k = seg.start_k; 
+    int end_node_k = seg.end_k;
+    
+    int seg_first_client = giant_tour[start_idx + start_node_k - 1]; // First customer of segment
+    int seg_last_client = giant_tour[start_idx + end_node_k - 1];   // Last customer of segment
 
-    if (geometry) {
-      for (int k = seg.start_k; k <= seg.end_k; ++k) {
-        int c_id = giant_tour[start_idx + k - 1];
-        int gene_idx = c_id - 2;
-        if (gene_idx >= 0) {
-          const auto &neighbors = geometry->GetNeighbors(gene_idx);
-          for (int neighbor : neighbors) {
-            if (neighbor < total_clients) {
-              int ng = genes[neighbor]; // Neighbors in window have old group,
-                                        // acceptable approx
-              if (ng >= 0 && ng < num_groups)
-                votes_buffer_[ng]++;
-            }
-          }
-        }
-      }
-    }
-
-    // Selection Logic
+    int seg_first_idx = (seg_first_client > 1) ? seg_first_client - 1 : 0;
+    
+    // Find Best Group
     int best_g = -1;
-    int max_votes = -1;
-    std::vector<int> feasible_groups;
+    double best_cost = 1e30;
 
-    // 1. Check feasible groups + Max Votes
-    for (int g = 0; g < num_groups; ++g) {
-      if (group_loads[g] + (int)seg_load <= capacity) {
-        feasible_groups.push_back(g);
-        if (votes_buffer_[g] > max_votes) {
-          max_votes = votes_buffer_[g];
-          best_g = g;
+    // Shuffle groups to break ties randomly? 
+    // Usually greedy is deterministic, but diversity helps. 
+    // Checking all groups is fast (num_groups ~20-50).
+    
+    std::vector<int> candidates(num_groups);
+    std::iota(candidates.begin(), candidates.end(), 0);
+    // std::shuffle(candidates.begin(), candidates.end(), rng); // Optional: add randomness
+
+    for (int g : candidates) {
+        if (group_loads[g] + (int)seg_demand <= capacity) {
+            // Calculate Connection Cost from Group's last node to Segment's first node
+            int last_node_id = last_customer_in_group[g];
+            int last_idx = (last_node_id > 1) ? last_node_id - 1 : 0;
+            
+            // Cost = Distance(Last, SegStart)
+            // Note: We ignore "Next" cost because it will be handled when processing the next segment
+            // or it's the future "right boundary" cost which is common for all unless we look ahead.
+            // Greedy insertion is usually sufficient.
+            double connection_cost = evaluator_->GetDist(last_idx, seg_first_idx);
+            
+            // Penalize using a group that is "far behind" in index? 
+            // No, strictly spatial distance is better.
+            
+            if (connection_cost < best_cost) {
+                best_cost = connection_cost;
+                best_g = g;
+            }
         }
-      }
     }
 
-    // 2. Fallback: Any feasible group
-    if (best_g == -1 && !feasible_groups.empty()) {
-      // Pick random feasible
-      std::uniform_int_distribution<int> dist(0, (int)feasible_groups.size() - 1);
-      best_g = feasible_groups[dist(rng)];
-    }
-
-    // 3. Fallback: Max Votes (ignore capacity)
+    // Fallback: If no capacity, pick random (or least loaded?)
     if (best_g == -1) {
-      max_votes = -1;
-      for (int g = 0; g < num_groups; ++g) {
-        if (votes_buffer_[g] > max_votes) {
-          max_votes = votes_buffer_[g];
-          best_g = g;
-        }
-      }
+       // Pick group with max remaining capacity
+       int max_val = -1;
+       for(int g=0; g<num_groups; ++g) {
+           int rem = capacity - group_loads[g];
+           if(rem > max_val) {
+               max_val = rem;
+               best_g = g;
+           }
+       }
     }
 
-    // 4. Absolute fallback
-    if (best_g == -1) {
-      std::uniform_int_distribution<int> dist(0, num_groups - 1);
-      best_g = dist(rng);
-    }
+    // Apply Assignment
+    group_loads[best_g] += (int)seg_demand;
+    last_customer_in_group[best_g] = seg_last_client; // Update last node for this group
 
-    // Apply
-    group_loads[best_g] += (int)seg_load;
     for (int k = seg.start_k; k <= seg.end_k; ++k) {
-      int c_id =
-          giant_tour[start_idx + k - 1]; // giant_tour IS the global permutation
-                                         // here (accessed by start_idx+k-1)
+      int c_id = giant_tour[start_idx + k - 1];
       int gene_idx = c_id - 2;
       if (gene_idx >= 0 && gene_idx < total_clients) {
         genes[gene_idx] = best_g;

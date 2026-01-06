@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES
 #include "ProblemGeometry.hpp"
 #include <iostream>
 #include <algorithm>
@@ -5,6 +6,11 @@
 #include <cmath>
 #include <limits>
 #include <chrono>
+
+// Define M_PI if not available (Windows without _USE_MATH_DEFINES)
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 using namespace LcVRPContest;
 
@@ -182,4 +188,43 @@ void ProblemGeometry::GenerateArtificialCoordinates(ThreadSafeEvaluator* evaluat
 
     artificial_coordinates_ = best_coords;
     std::cout << "[Island " << id_ << "] MDS Final. Best Stress: " << best_stress << "\n";
+}
+
+std::vector<int> ProblemGeometry::CreateAngularPermutation(double offset_radians) const {
+    if (coordinates_.empty() || coordinates_.size() < 3) {
+        return {};  // Need at least depot + 1 customer
+    }
+    
+    // Depot is at index 1 (ID=1), customers start at index 2 (ID=2)
+    const Coordinate& depot = coordinates_[1];
+    
+    // Build angle list for all customers
+    std::vector<std::pair<double, int>> angles;
+    angles.reserve(coordinates_.size() - 2);
+    
+    for (size_t i = 2; i < coordinates_.size(); ++i) {
+        const Coordinate& c = coordinates_[i];
+        double angle = std::atan2(c.y - depot.y, c.x - depot.x);
+        
+        // Apply offset and normalize to [0, 2*pi)
+        angle += offset_radians;
+        while (angle < 0) angle += 2.0 * M_PI;
+        while (angle >= 2.0 * M_PI) angle -= 2.0 * M_PI;
+        
+        angles.push_back({angle, static_cast<int>(i)});  // i is customer_id
+    }
+    
+    // Sort by angle
+    std::sort(angles.begin(), angles.end());
+    
+    // Build permutation: depot first, then sorted customers
+    std::vector<int> result;
+    result.reserve(angles.size() + 1);
+    result.push_back(1);  // Depot ID
+    
+    for (size_t i = 0; i < angles.size(); ++i) {
+        result.push_back(angles[i].second);  // customer_id
+    }
+    
+    return result;
 }

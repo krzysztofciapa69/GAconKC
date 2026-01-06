@@ -335,51 +335,61 @@ double ThreadSafeEvaluator::GetRouteCost(const std::vector<int> &route_nodes) co
 
     if (entry.occupied && entry.key == key) {
         route_cache_hits_++;
-        // entry.cost includes capacity penalty as per EvaluateWithStats logic
         return entry.cost;
     }
 
     route_cache_misses_++;
 
-    // 3. Compute Cost (Fallback - mirrors LocalSearch::SimulateRouteCost)
+    // 3. Compute Cost (Fallback - with FULL constraint logic)
     double total_cost = 0.0;
     int current_load = 0;
-    int last_idx = 0; // Depot
+    double current_segment_dist = 0.0; // Distance since last depot departure
+    int last_node_idx = depot_index_;
+    int returns_count = 0;
 
     for (int customer_id : route_nodes) {
         int matrix_idx = customer_id - 1;
         int demand = demands_[matrix_idx];
 
+        // Capacity Check
         if (current_load + demand > capacity_) {
-             total_cost += GetDist(last_idx, depot_index_);
-             last_idx = depot_index_; // Reset to depot
+             returns_count++;
+             total_cost += GetDist(last_node_idx, depot_index_);
+             last_node_idx = depot_index_;
              current_load = 0;
+             current_segment_dist = 0.0;
         }
-        
-        total_cost += GetDist(last_idx, matrix_idx);
-        last_idx = matrix_idx;
-        current_load += demand;
-    }
-    // Final return to depot
-    total_cost += GetDist(last_idx, depot_index_);
 
-    // 4. Update Cache
-    // Calculate returns count for cache consistency (needed for Evaluate reuse)
-    int returns_count = 0;
-    {
-        int tmp_load = 0;
-        for (int customer_id : route_nodes) {
-             int demand = demands_[customer_id - 1];
-             if (tmp_load + demand > capacity_) {
-                 returns_count++;
-                 tmp_load = 0;
+        double d_travel = GetDist(last_node_idx, matrix_idx);
+
+        // Distance Constraint Check
+        if (has_distance_constraint_) {
+             double d_return = GetDist(matrix_idx, depot_index_);
+             if (current_segment_dist + d_travel + d_return > max_distance_) {
+                 if (last_node_idx != depot_index_) {
+                     returns_count++;
+                     total_cost += GetDist(last_node_idx, depot_index_);
+                     last_node_idx = depot_index_;
+                     current_load = 0;
+                     current_segment_dist = 0.0;
+                     d_travel = GetDist(depot_index_, matrix_idx);
+                 }
              }
-             tmp_load += demand;
         }
-        // EvaluateWithStats counts checks returns slightly differently (adds return leg cost)
-        // But 'returns' count is specifically depot visits.
-        if (tmp_load > 0) returns_count++; 
+
+        total_cost += d_travel;
+        current_segment_dist += d_travel;
+        current_load += demand;
+        last_node_idx = matrix_idx;
     }
+
+    // Return to depot
+    if (last_node_idx != depot_index_) {
+        returns_count++; // Final return to depot
+        total_cost += GetDist(last_node_idx, depot_index_);
+    }
+
+
     
     // Store in cache
     route_cache_[cache_idx] = {key, total_cost, returns_count, true};

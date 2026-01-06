@@ -36,9 +36,10 @@ public:
   bool ApplySimpleMutation(Individual &indiv, std::mt19937 &rng);
 
   // Mutator.hpp
-  // intensity: 0.0 (lekka mutacja ~20%) do 1.0 (ciężka mutacja ~40-50%)
+  // intensity: 0.0 (lekka mutacja) do 1.0 (ciężka mutacja)
+  // is_exploitation: true = smaller windows (10-25%), false = larger (30-70%)
   bool ApplyRuinRecreate(Individual &indiv, double intensity,
-                         std::mt19937 &rng);
+                         bool is_exploitation, std::mt19937 &rng);
 
   // Return Minimizer - finds clients causing capacity overflows and relocates
   // them

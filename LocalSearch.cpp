@@ -139,9 +139,14 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
       // OPTIMIZED: Always use neighbor-based candidates (skip full scan)
       const auto &my_neighbors = geometry_->GetNeighbors(client_idx);
       int checked_count = 0;
+      int max_neighbors = Config::NUM_NEIGHBORS;
+      
+      // ADAPTIVE: For huge instances, reduce neighborhood search size drastically
+      if (num_clients > 2000) max_neighbors = 15;
+      else if (num_clients > 1000) max_neighbors = 20;
 
       for (int neighbor_idx : my_neighbors) {
-        if (checked_count++ > Config::NUM_NEIGHBORS)
+        if (checked_count++ > max_neighbors)
           break;
         if (neighbor_idx >= num_clients)
           continue;
@@ -203,7 +208,23 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
 
         double total_delta = source_delta + target_delta;
 
-        if (total_delta < best_total_delta) {
+        // Standard acceptance: better delta wins
+        bool accept_move = (total_delta < best_total_delta);
+        
+        // SLACK-AWARE: Accept slightly worse moves (up to 1%) if they relieve tight routes
+        if (!accept_move && Config::VND_SLACK_AWARE && total_delta < 0) {
+          double relative_delta = total_delta / std::max(1.0, route_costs_[g_u] + route_costs_[target_g]);
+          if (relative_delta > -Config::VND_SLACK_TOLERANCE) {  // within 1% tolerance
+            // Check if source route was "tight" (>95% capacity)
+            double src_load_ratio = (double)vnd_loads_[g_u] / evaluator_->GetCapacity();
+            if (src_load_ratio > Config::VND_TIGHT_ROUTE_THRESHOLD) {
+              // Moving client OUT of tight route = good for slack
+              accept_move = true;
+            }
+          }
+        }
+        
+        if (accept_move) {
           best_total_delta = total_delta;
           best_target_g = target_g;
           best_insert_pos = ins_pos;
@@ -319,7 +340,10 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
 
             // Usuń u z source, dodaj v
             auto &r_src = vnd_routes_[g_u];
-            r_src.erase(std::find(r_src.begin(), r_src.end(), u));
+            auto it_u_rem = std::find(r_src.begin(), r_src.end(), u);
+            if (it_u_rem == r_src.end()) continue; // Safety check
+            r_src.erase(it_u_rem);
+            
             auto it_v_ins = std::upper_bound(
                 r_src.begin(), r_src.end(), customer_ranks_[v],
                 [&](int r, int id) { return r < customer_ranks_[id]; });
@@ -327,12 +351,24 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
 
             // Usuń v z target, dodaj u
             auto &r_tgt = vnd_routes_[target_g];
-            r_tgt.erase(std::find(r_tgt.begin(), r_tgt.end(), v));
+            auto it_v_rem = std::find(r_tgt.begin(), r_tgt.end(), v);
+            if (it_v_rem == r_tgt.end()) {
+                // Restore r_src state if target find fails (should not happen)
+                auto it_v_back = std::find(r_src.begin(), r_src.end(), v);
+                if (it_v_back != r_src.end()) r_src.erase(it_v_back);
+                auto it_u_back = std::upper_bound(
+                    r_src.begin(), r_src.end(), customer_ranks_[u],
+                    [&](int r, int id) { return r < customer_ranks_[id]; });
+                r_src.insert(it_u_back, u);
+                continue;
+            }
+            r_tgt.erase(it_v_rem);
+            
             auto it_u_ins = std::upper_bound(
                 r_tgt.begin(), r_tgt.end(), customer_ranks_[u],
                 [&](int r, int id) { return r < customer_ranks_[id]; });
             r_tgt.insert(it_u_ins, u);
-
+            
             // Update loads
             int demand_u = evaluator_->GetDemand(u);
             int demand_v = evaluator_->GetDemand(v);
@@ -358,6 +394,9 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
               if (n_idx < (int)dlb_.size())
                 dlb_[n_idx] = false;
             }
+
+            // CRITICAL FIX: Update positions and loads after SWAP
+            UpdatePositionsAfterMove(u, g_u, target_g);
           }
         }
 
@@ -382,7 +421,7 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
   // === EJECTION CHAIN PHASE (probabilistic, ~20% of clients) ===
   if (allow_ejection) {
     std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
-    const double EJECTION_PROBABILITY = 0.20;
+    const double EJECTION_PROBABILITY = Config::EJECTION_PROBABILITY;
     
     for (int client_idx = 0; client_idx < num_clients; ++client_idx) {
       // Skip with 80% probability
@@ -406,8 +445,11 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
   }
 
   // === PATH RELINKING PHASE (escape mechanism when stuck) ===
-  // Only try if we have a guide solution and haven't found improvement this round
-  if (!any_change && !guide_solution_.empty() && guide_solution_.size() == genotype.size()) {
+  // Run with probability even if changes were made - adds stochastic exploration
+  std::uniform_real_distribution<double> pr_prob(0.0, 1.0);
+  bool should_try_pr = (!any_change) || (pr_prob(rng_) < Config::PATH_RELINK_PROBABILITY);  // always try when stuck
+  
+  if (should_try_pr && !guide_solution_.empty() && guide_solution_.size() == genotype.size()) {
     // Calculate current total cost for PR
     double current_total = 0.0;
     for (int g = 0; g < num_groups; ++g) {
@@ -428,9 +470,9 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
         guide_cost += SimulateRouteCost(r);
     }
     
-    // Threshold: Allow PR only if within 5% of the guide (Best Known)
+    // Threshold: Allow PR only if within 15% of the guide (Best Known)
     // If we are too far off, it's waste of CPU to relink
-    if (current_total < guide_cost * 1.05) {
+    if (current_total < guide_cost * 1.15) {
         // Try Path Relinking towards the guide solution
         if (TryPathRelinking(genotype, current_total, guide_solution_)) {
           any_change = true;
@@ -632,71 +674,191 @@ double LocalSearch::SimulateRouteCostWithInsert(int target_route, int client_id,
   const auto &route = vnd_routes_[target_route];
   int capacity = evaluator_->GetCapacity();
   int route_size = static_cast<int>(route.size());
+  bool check_dist = evaluator_->HasDistanceConstraint();
+  double max_dist = evaluator_->GetMaxDistance();
 
   double total_cost = 0.0;
   int current_load = 0;
+  double current_segment_dist = 0.0;
   int last_idx = 0; // Depot
 
+  // Unify loops or duplicate logic? Duplicate for performance (avoid check in loop).
+  // Actually, the logic is complex enough that duplicating might be error prone.
+  // Let's use a lambda or just duplicative logic for now as it's critical hot path.
+  
   if (fast_matrix_) {
-    // OPTIMIZED
     for (int pos = 0; pos <= route_size; ++pos) {
+      // Logic to determine "next customer" in the virtual route
+      int current_customer_id = -1;
+      
+      // Virtual insertion logic
+      if (pos == insert_pos) {
+          current_customer_id = client_id;
+      } else {
+          // If we passed the insertion point, we take route[pos-1]
+          // If not, we take route[pos]
+          // Wait, the original loop structure was:
+          // Check if we need to insert at current 'pos'. If so, process inserted. 
+          // THEN process route[pos].
+          // Let's stick to that structure.
+      }
+      
+      // --- Iteration logic handling insert ---
+      // We will perform 1 or 2 iterations of logic inside this loop step
+      int iterations = (pos == insert_pos) ? 2 : 1;
+      // If iterations=2: pass 0 is inserted item, pass 1 is route[pos]
+      // If pos==route_size, we only process inserted item if insert_pos==route_size
+      
+      // Let's stick to the original "double if" structure, it's safer.
+      
+      // 1. Check Insertion
       if (pos == insert_pos) {
         int demand = evaluator_->GetDemand(client_id);
         int customer_idx = client_id - 1;
+        
+        // Capacity Logic
         if (current_load + demand > capacity) {
           total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
           last_idx = 0;
           current_load = 0;
+          current_segment_dist = 0.0;
         }
-        total_cost += fast_matrix_[last_idx * matrix_dim_ + customer_idx];
-        last_idx = customer_idx;
+
+        double d_travel = fast_matrix_[last_idx * matrix_dim_ + customer_idx];
+        
+        // Distance Logic
+        if (check_dist) {
+             double d_return = fast_matrix_[customer_idx * matrix_dim_ + 0];
+             if (current_segment_dist + d_travel + d_return > max_dist) {
+                 if (last_idx != 0) {
+                     total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
+                     last_idx = 0;
+                     current_load = 0;
+                     current_segment_dist = 0.0;
+                     d_travel = fast_matrix_[0 * matrix_dim_ + customer_idx];
+                 }
+             }
+        }
+
+        total_cost += d_travel;
+        current_segment_dist += d_travel;
         current_load += demand;
+        last_idx = customer_idx;
+        
+        if (pos == route_size) continue; // Final insertion, done
       }
+      
+      // 2. Check Existing
       if (pos < route_size) {
         int orig_client_id = route[pos];
         int demand = evaluator_->GetDemand(orig_client_id);
         int customer_idx = orig_client_id - 1;
+
         if (current_load + demand > capacity) {
           total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
           last_idx = 0;
           current_load = 0;
+          current_segment_dist = 0.0;
         }
-        total_cost += fast_matrix_[last_idx * matrix_dim_ + customer_idx];
-        last_idx = customer_idx;
+
+        double d_travel = fast_matrix_[last_idx * matrix_dim_ + customer_idx];
+        
+        if (check_dist) {
+             double d_return = fast_matrix_[customer_idx * matrix_dim_ + 0];
+             if (current_segment_dist + d_travel + d_return > max_dist) {
+                 if (last_idx != 0) {
+                     total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
+                     last_idx = 0;
+                     current_load = 0;
+                     current_segment_dist = 0.0;
+                     d_travel = fast_matrix_[0 * matrix_dim_ + customer_idx];
+                 }
+             }
+        }
+        
+        total_cost += d_travel;
+        current_segment_dist += d_travel;
         current_load += demand;
+        last_idx = customer_idx;
       }
     }
-    total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
+    // Return to depot
+    if (last_idx != 0) {
+        total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
+    }
   } else {
-    // SLOW
+    // SLOW PATH (Duplicated logic using evaluator->GetDist)
     for (int pos = 0; pos <= route_size; ++pos) {
       if (pos == insert_pos) {
         int demand = evaluator_->GetDemand(client_id);
         int customer_idx = client_id - 1;
+        
         if (current_load + demand > capacity) {
           total_cost += evaluator_->GetDist(last_idx, 0);
           last_idx = 0;
           current_load = 0;
+          current_segment_dist = 0.0;
         }
-        total_cost += evaluator_->GetDist(last_idx, customer_idx);
-        last_idx = customer_idx;
+
+        double d_travel = evaluator_->GetDist(last_idx, customer_idx);
+        
+        if (check_dist) {
+             double d_return = evaluator_->GetDist(customer_idx, 0);
+             if (current_segment_dist + d_travel + d_return > max_dist) {
+                 if (last_idx != 0) {
+                     total_cost += evaluator_->GetDist(last_idx, 0);
+                     last_idx = 0;
+                     current_load = 0;
+                     current_segment_dist = 0.0;
+                     d_travel = evaluator_->GetDist(0, customer_idx);
+                 }
+             }
+        }
+
+        total_cost += d_travel;
+        current_segment_dist += d_travel;
         current_load += demand;
+        last_idx = customer_idx;
+        
+        if (pos == route_size) continue;
       }
+      
       if (pos < route_size) {
         int orig_client_id = route[pos];
         int demand = evaluator_->GetDemand(orig_client_id);
         int customer_idx = orig_client_id - 1;
+
         if (current_load + demand > capacity) {
           total_cost += evaluator_->GetDist(last_idx, 0);
           last_idx = 0;
           current_load = 0;
+          current_segment_dist = 0.0;
         }
-        total_cost += evaluator_->GetDist(last_idx, customer_idx);
-        last_idx = customer_idx;
+
+        double d_travel = evaluator_->GetDist(last_idx, customer_idx);
+
+        if (check_dist) {
+             double d_return = evaluator_->GetDist(customer_idx, 0);
+             if (current_segment_dist + d_travel + d_return > max_dist) {
+                 if (last_idx != 0) {
+                     total_cost += evaluator_->GetDist(last_idx, 0);
+                     last_idx = 0;
+                     current_load = 0;
+                     current_segment_dist = 0.0;
+                     d_travel = evaluator_->GetDist(0, customer_idx);
+                 }
+             }
+        }
+
+        total_cost += d_travel;
+        current_segment_dist += d_travel;
         current_load += demand;
+        last_idx = customer_idx;
       }
     }
-    total_cost += evaluator_->GetDist(last_idx, 0);
+    if (last_idx != 0) {
+        total_cost += evaluator_->GetDist(last_idx, 0);
+    }
   }
 
   return total_cost;
@@ -709,9 +871,12 @@ double LocalSearch::SimulateRouteCostWithRemoval(int source_route,
 
   const auto &route = vnd_routes_[source_route];
   int capacity = evaluator_->GetCapacity();
+  bool check_dist = evaluator_->HasDistanceConstraint();
+  double max_dist = evaluator_->GetMaxDistance();
 
   double total_cost = 0.0;
   int current_load = 0;
+  double current_segment_dist = 0.0;
   int last_idx = 0; // Depot
 
   if (fast_matrix_) {
@@ -721,16 +886,37 @@ double LocalSearch::SimulateRouteCostWithRemoval(int source_route,
         continue;
       int demand = evaluator_->GetDemand(orig_client_id);
       int customer_idx = orig_client_id - 1;
+      
       if (current_load + demand > capacity) {
         total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
         last_idx = 0;
         current_load = 0;
+        current_segment_dist = 0.0;
       }
-      total_cost += fast_matrix_[last_idx * matrix_dim_ + customer_idx];
-      last_idx = customer_idx;
+      
+      double d_travel = fast_matrix_[last_idx * matrix_dim_ + customer_idx];
+      
+      if (check_dist) {
+           double d_return = fast_matrix_[customer_idx * matrix_dim_ + 0];
+           if (current_segment_dist + d_travel + d_return > max_dist) {
+               if (last_idx != 0) {
+                   total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
+                   last_idx = 0;
+                   current_load = 0;
+                   current_segment_dist = 0.0;
+                   d_travel = fast_matrix_[0 * matrix_dim_ + customer_idx];
+               }
+           }
+      }
+
+      total_cost += d_travel;
+      current_segment_dist += d_travel;
       current_load += demand;
+      last_idx = customer_idx;
     }
-    total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
+    if (last_idx != 0) {
+        total_cost += fast_matrix_[last_idx * matrix_dim_ + 0];
+    }
   } else {
     // SLOW
     for (int orig_client_id : route) {
@@ -738,16 +924,37 @@ double LocalSearch::SimulateRouteCostWithRemoval(int source_route,
         continue;
       int demand = evaluator_->GetDemand(orig_client_id);
       int customer_idx = orig_client_id - 1;
+      
       if (current_load + demand > capacity) {
         total_cost += evaluator_->GetDist(last_idx, 0);
         last_idx = 0;
         current_load = 0;
+        current_segment_dist = 0.0;
       }
-      total_cost += evaluator_->GetDist(last_idx, customer_idx);
-      last_idx = customer_idx;
+      
+      double d_travel = evaluator_->GetDist(last_idx, customer_idx);
+      
+      if (check_dist) {
+           double d_return = evaluator_->GetDist(customer_idx, 0);
+           if (current_segment_dist + d_travel + d_return > max_dist) {
+               if (last_idx != 0) {
+                   total_cost += evaluator_->GetDist(last_idx, 0);
+                   last_idx = 0;
+                   current_load = 0;
+                   current_segment_dist = 0.0;
+                   d_travel = evaluator_->GetDist(0, customer_idx);
+               }
+           }
+      }
+
+      total_cost += d_travel;
+      current_segment_dist += d_travel;
       current_load += demand;
+      last_idx = customer_idx;
     }
-    total_cost += evaluator_->GetDist(last_idx, 0);
+    if (last_idx != 0) {
+        total_cost += evaluator_->GetDist(last_idx, 0);
+    }
   }
 
   return total_cost;
@@ -776,6 +983,18 @@ void LocalSearch::UpdatePositionsAfterMove(int client_id, int old_route,
       }
     }
     route_costs_[old_route] = SimulateRouteCost(route);
+    
+    // Update cumulative load for old_route
+    int max_load = 0;
+    int current_load = 0;
+    int capacity = evaluator_->GetCapacity();
+    for (int cid : route) {
+        int demand = evaluator_->GetDemand(cid);
+        if (current_load + demand > capacity) current_load = 0;
+        current_load += demand;
+        if (current_load > max_load) max_load = current_load;
+    }
+    if (old_route < (int)max_cumulative_load_.size()) max_cumulative_load_[old_route] = max_load;
   }
 
   // Update positions for new_route
@@ -794,6 +1013,18 @@ void LocalSearch::UpdatePositionsAfterMove(int client_id, int old_route,
       }
     }
     route_costs_[new_route] = SimulateRouteCost(route);
+
+    // Update cumulative load for new_route
+    int max_load = 0;
+    int current_load = 0;
+    int capacity = evaluator_->GetCapacity();
+    for (int cid : route) {
+        int demand = evaluator_->GetDemand(cid);
+        if (current_load + demand > capacity) current_load = 0;
+        current_load += demand;
+        if (current_load > max_load) max_load = current_load;
+    }
+    if (new_route < (int)max_cumulative_load_.size()) max_cumulative_load_[new_route] = max_load;
   }
 }
 

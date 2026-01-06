@@ -127,6 +127,9 @@ public:
   // Get number of routes added since last clear
   size_t GetTotalRoutesAdded() const { return total_routes_added_; }
 
+  // Check if new routes were added since a snapshot
+  bool HasNewRoutesSince(size_t snapshot) const { return total_routes_added_ > snapshot; }
+
 private:
   // Calculate route cost using evaluator logic (single route)
   double CalculateRouteCost(const std::vector<int> &route,

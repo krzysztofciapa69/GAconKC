@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <set>
 
 using namespace LcVRPContest;
 using namespace std;
@@ -105,20 +106,73 @@ void Optimizer::IslandWorkerLoop(int island_idx) {
     if (my_island->GetBestFitness() < current_best_fitness_) {
       std::lock_guard<std::mutex> lock(global_mutex_);
       if (my_island->GetBestFitness() < current_best_fitness_) {
+
+        // Calculate structural difference (Broken Pairs Distance)
+        double diff_pct = 100.0;
+        if (current_best_indiv_.GetGenotype().size() > 0) {
+             const std::vector<int>& g1 = current_best_indiv_.GetGenotype();
+             // FIX: Store by value to avoid dangling reference from temporary GetBestIndividual()
+             Individual new_best = my_island->GetBestIndividual(); 
+             const std::vector<int>& g2 = new_best.GetGenotype();
+             const std::vector<int>& perm = evaluator_.GetProblemData().GetPermutation();
+             int num_groups = evaluator_.GetNumGroups();
+             int size = (int)g1.size();
+             
+             if (size > 0 && g1.size() == g2.size()) {
+                 std::vector<int> p1(size, -2), p2(size, -2);
+                 std::vector<int> last1(num_groups, -1), last2(num_groups, -1);
+                 
+                 // Debug stats
+                 // int p1_valid_count = 0;
+                 // int p2_valid_count = 0;
+
+                 for (int customer_id : perm) {
+                     int idx = customer_id - 2;
+                     if (idx < 0 || idx >= size) continue;
+                     
+                     int gr1 = g1[idx];
+                     if (gr1 >= 0 && gr1 < num_groups) { 
+                         p1[idx] = last1[gr1]; 
+                         last1[gr1] = idx; 
+                         // p1_valid_count++;
+                     }
+                     
+                     int gr2 = g2[idx];
+                     if (gr2 >= 0 && gr2 < num_groups) { 
+                         p2[idx] = last2[gr2]; 
+                         last2[gr2] = idx; 
+                         // p2_valid_count++;
+                     }
+                 }
+                 
+                 int dist = 0;
+                 for(int k=0; k<size; ++k) {
+                     if (p1[k] != p2[k]) dist++;
+                 }
+                 diff_pct = (dist * 100.0) / size;
+
+                 // Debug removed
+
+             }
+        }
+
         current_best_ = my_island->GetBestSolution();
         current_best_fitness_ = my_island->GetBestFitness();
         current_best_indiv_ = my_island->GetBestIndividual();
 
-        auto now = std::chrono::steady_clock::now();
-        double elapsed = std::chrono::duration<double>(now - start_time_).count();
+         auto now = std::chrono::steady_clock::now();
+         double elapsed = std::chrono::duration<double>(now - start_time_).count();
 
-        const char* island_type = my_island->IsExploration() ? "EXPLORE" : "EXPLOIT";
-        cout << "\033[92m [Island " << island_idx << " " << island_type
-             << "] NEW BEST: " << fixed << setprecision(2)
-             << current_best_fitness_
-             << " (returns=" << current_best_indiv_.GetReturnCount() << ")"
-             << " @ gen " << local_gen << " (t=" << setprecision(1) << elapsed
-             << "s)\033[0m\n";
+         const char* island_type = my_island->IsExploration() ? "EXPLORE" : "EXPLOIT";
+         cout << "\033[92m [Island " << island_idx << " " << island_type
+              << "] NEW BEST: " << fixed << setprecision(2)
+              << current_best_fitness_
+              << " (ret=" << current_best_indiv_.GetReturnCount() 
+              << ", diff=" << setprecision(1) << diff_pct << "%"
+              << " [sz=" << current_best_indiv_.GetGenotype().size() 
+              << " p=" << evaluator_.GetProblemData().GetPermutation().size() << "])"
+              << " @ gen " << local_gen << " (t=" << setprecision(1) << elapsed
+              << "s)\033[0m\n";
 
 
       }
@@ -150,42 +204,50 @@ void Optimizer::PerformRingMigration() {
   int total_migrants = 0;
   int total_elite = 0;
   
+  // === GLOBAL HOMOGENIZATION CHECK ===
+  // Count unique best solutions across all islands
+  std::set<uint64_t> unique_best_hashes;
   for (int i = 0; i < 6; ++i) {
-    // Calculate number of migrants based on source island population (10%)
-    int pop_size = (i % 2 == 0) ? Config::EXPLORATION_POPULATION_SIZE 
-                                : Config::EXPLOITATION_POPULATION_SIZE;
-    int num_migrants = std::max(2, (int)(pop_size * Config::RING_MIGRATION_RATE));
-    
+    Individual best = islands_[i]->GetBestIndividual();
+    uint64_t h = 1469598103934665603ULL;
+    for (int x : best.GetGenotype()) { h ^= x; h *= 1099511628211ULL; }
+    unique_best_hashes.insert(h);
+  }
+  bool global_homogenized = (unique_best_hashes.size() <= 2);
+  
+  if (global_homogenized) {
+    cout << "\033[93m [RING] GLOBAL HOMOGENIZATION DETECTED (" << unique_best_hashes.size() 
+         << "/6 unique) - Forcing 0% elite migration\033[0m\n";
+  }
+  
+  for (int i = 0; i < 6; ++i) {
     int next = (i + 1) % 6;
-    double target_cv = islands_[next]->GetCurrentCV();
     
-    // Dynamic Ratio Logic:
-    // - Low Diversity (< 0.1): Target is Stagnant -> Send mostly DIVERSE (20% Elite, 80% Diverse)
-    // - High Diversity (> 0.4): Target is Chaotic -> Send mostly ELITE (70% Elite, 30% Diverse)
-    // - Balanced: 50/50
-    double elite_ratio = 0.5;
-    if (target_cv < 0.1) {
-        elite_ratio = 0.2; 
-    } else if (target_cv > 0.4) {
-        elite_ratio = 0.7;
-    }
-    
-    int best_count = (int)(num_migrants * elite_ratio);
-    best_count = std::max(1, best_count); // Always send at least one elite
-    int diverse_count = num_migrants - best_count;
-    
-    // Get target's best for diversity calculation
-    Individual target_best = islands_[next]->GetBestIndividual();
+    // Get bests to check for homogenization
     Individual source_best = islands_[i]->GetBestIndividual();
+    Individual target_best = islands_[next]->GetBestIndividual();
     
-    // Inject Elites
-    for (int m = 0; m < best_count; ++m) {
-      islands_[next]->InjectImmigrant(source_best);
-      total_migrants++;
-      total_elite++;
+    // Check if bests are IDENTICAL - if so, we're homogenized, send only diverse!
+    bool bests_identical = (source_best.GetGenotype() == target_best.GetGenotype());
+    
+    // DIVERSITY-FIRST MIGRATION: fixed 2 elite + 3 diverse (max BPD from global best)
+    int elite_count = Config::MIGRATION_ELITE_COUNT;     // 2 elite
+    int diverse_count = Config::MIGRATION_DIVERSE_COUNT; // 3 diverse
+    
+    if (global_homogenized || bests_identical) {
+      elite_count = 0;  // Full diversity mode when homogenized
+      diverse_count = 5;
     }
     
-    // Inject Diverse
+    // Inject Elites (or sabotage if homogenized)
+    for (int m = 0; m < elite_count; ++m) {
+        Individual elite = islands_[i]->GetRandomEliteIndividual();
+        islands_[next]->InjectImmigrant(elite);
+        total_migrants++;
+        total_elite++;
+    }
+    
+    // Inject Diverse (max BPD from target's best)
     for (int m = 0; m < diverse_count; ++m) {
       Individual diverse_ind = islands_[i]->GetMostDiverseMigrantFor(target_best);
       islands_[next]->InjectImmigrant(diverse_ind);
@@ -204,6 +266,43 @@ void Optimizer::PerformRingMigration() {
   cout << "\n";
 }
 
+// DIVERSITY-PULSE MIGRATION: Every 60s, aggressive injection of structurally different solutions
+// Only accepts migrants with BPD > 20% relative to target island's best
+void Optimizer::PerformDiversityPulseMigration() {
+  cout << "\033[95m [PULSE] Diversity-Pulse Migration triggered\033[0m\n";
+  
+  int total_injected = 0;
+  
+  for (int i = 0; i < 6; ++i) {
+    int next = (i + 1) % 6;
+    
+    // Get target's best for BPD comparison
+    Individual target_best = islands_[next]->GetBestIndividual();
+    int genotype_size = static_cast<int>(target_best.GetGenotype().size());
+    int bpd_threshold = static_cast<int>(genotype_size * Config::DIVERSITY_PULSE_BPD_THRESHOLD);  // 20%
+    
+    // Get 15% of source population
+    int pop_size = (i % 2 == 0) ? Config::EXPLORATION_POPULATION_SIZE 
+                                : Config::EXPLOITATION_POPULATION_SIZE;
+    int num_candidates = std::max(5, static_cast<int>(pop_size * Config::DIVERSITY_PULSE_RATE));
+    
+    // Get diverse candidates from source island
+    for (int m = 0; m < num_candidates; ++m) {
+      Individual candidate = islands_[i]->GetMostDiverseMigrantFor(target_best);
+      
+      // BPD filter: only inject if structurally different enough
+      int bpd = islands_[i]->CalculateBrokenPairsDistancePublic(candidate, target_best);
+      
+      if (bpd >= bpd_threshold) {
+        islands_[next]->InjectImmigrant(candidate);
+        total_injected++;
+      }
+    }
+  }
+  
+  cout << " [PULSE] Injected " << total_injected << " diverse migrants (BPD>" 
+       << (Config::DIVERSITY_PULSE_BPD_THRESHOLD * 100) << "%)\n";
+}
 
 
 void Optimizer::PrintIslandStats() {
@@ -252,6 +351,44 @@ void Optimizer::PrintIslandStats() {
        
   cout << "  Global Best: " << setprecision(2) << current_best_fitness_ << "\n";
   cout << "  Path Relinking Successes: " << totalpr << "\n";
+  
+  // === INTER-ISLAND HOMOGENIZATION CHECK ===
+  // Compare best solutions across all islands to detect convergence to same local optimum
+  std::vector<uint64_t> best_hashes(6);
+  std::vector<double> best_fits(6);
+  for (int i = 0; i < 6; ++i) {
+    Individual best = islands_[i]->GetBestIndividual();
+    best_fits[i] = best.GetFitness();
+    uint64_t h = 1469598103934665603ULL;
+    for (int x : best.GetGenotype()) { h ^= x; h *= 1099511628211ULL; }
+    best_hashes[i] = h;
+  }
+  
+  // Count unique bests
+  std::set<uint64_t> unique_bests(best_hashes.begin(), best_hashes.end());
+  int unique_best_count = (int)unique_bests.size();
+  
+  // Count similar fitness (within 1000 of each other)
+  int similar_fit_count = 0;
+  for (int i = 0; i < 6; ++i) {
+    for (int j = i+1; j < 6; ++j) {
+      if (std::abs(best_fits[i] - best_fits[j]) < 1000) similar_fit_count++;
+    }
+  }
+  
+  // Problem diagnosis
+  std::string global_issues = "";
+  if (unique_best_count <= 2) global_issues += "\033[31m[HOMOGENIZED: " + std::to_string(unique_best_count) + "/6 unique bests]\033[0m ";
+  if (similar_fit_count >= 10) global_issues += "\033[33m[CONVERGED: " + std::to_string(similar_fit_count) + "/15 pairs similar]\033[0m ";
+  
+  double explore_avg = (best_fits[0] + best_fits[2] + best_fits[4]) / 3.0;
+  double exploit_avg = (best_fits[1] + best_fits[3] + best_fits[5]) / 3.0;
+  if (explore_avg < exploit_avg - 1000) global_issues += "\033[35m[EXPLORE_BETTER: exploiters lagging]\033[0m ";
+  
+  if (!global_issues.empty()) {
+    cout << "  ISSUES: " << global_issues << "\n";
+  }
+  
   cout << "===============================\n\n";
 }
 
@@ -272,6 +409,15 @@ void Optimizer::RunIteration() {
     PerformRingMigration();
     last_ring_migration = elapsed;
   }
+  
+  // === DIVERSITY-PULSE MIGRATION (every 60s, aggressive diversity injection) ===
+  static double last_diversity_pulse = 0.0;
+  if (elapsed - last_diversity_pulse >= Config::DIVERSITY_PULSE_INTERVAL_SECONDS) {
+    PerformDiversityPulseMigration();
+    last_diversity_pulse = elapsed;
+  }
+  
+  // NOTE: Stagnation swap removed - GLS handles diversification per-island
 }
 
 int Optimizer::GetGeneration() {

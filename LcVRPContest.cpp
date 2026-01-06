@@ -6,6 +6,8 @@
 #include <chrono>
 #include <conio.h>
 #include <fstream>
+#include <limits>
+#include <thread>
 
 #ifdef _WIN32
 #include <direct.h>
@@ -60,11 +62,11 @@ void StartOptimization(const string& folder_name, const string& instance_name, i
 	optimizer.Initialize();
 
 	for (int i = 0; i < max_iterations; ++i) {
-        if (_kbhit()) {             // 1. SprawdŸ, czy coœ wciœniêto (b³yskawiczne)
+        if (_kbhit()) {             // 1. Sprawdz, czy cos wcisnieto
             char ch = _getch();     // 2. Pobierz ten znak
-            if (ch == ' ') {        // 3. Jeœli to spacja...
+            if (ch == ' ') {        // 3. Jesli to spacja...
                 cout << "\n[!] Przerwano recznie spacja." << "\n";
-                break;              // Wyjdz z petli, kod dalej wykona zapis wynikow
+                break;              // Wyjdz z petli
             }
         }
 
@@ -97,6 +99,28 @@ void StartOptimization(const string& folder_name, const string& instance_name, b
     ProblemLoader problem_loader(folder_name, instance_name, use_random_permutation);
     ProblemData problem_data = problem_loader.LoadProblem();
 
+    // === USER REQUESTED LOGGING ===
+    long long total_demand = 0;
+    int min_demand = std::numeric_limits<int>::max();
+    int max_demand = 0;
+    const std::vector<int>& dem = problem_data.GetDemands();
+    for (int d : dem) {
+        total_demand += d;
+        if (d > 0) { // Ignore depot or zero demand nodes
+            if (d < min_demand) min_demand = d;
+            if (d > max_demand) max_demand = d;
+        }
+    }
+    long long total_capacity = (long long)problem_data.GetCapacity() * problem_data.GetNumGroups();
+
+    std::cout << "\n=== DEMAND STATISTICS ===\n";
+    std::cout << "Total Demand:   " << total_demand << "\n";
+    std::cout << "Total Capacity: " << total_capacity << " (" << problem_data.GetNumGroups() << " vehicles * " << problem_data.GetCapacity() << ")\n";
+    std::cout << "Min Demand:     " << (min_demand == std::numeric_limits<int>::max() ? 0 : min_demand) << "\n";
+    std::cout << "Max Demand:     " << max_demand << "\n";
+    std::cout << "=========================\n\n";
+    // ==============================
+
     std::vector<int> current_perm = problem_data.GetPermutation();
     std::random_device rd;
     std::mt19937 g(rd());
@@ -118,11 +142,11 @@ void StartOptimization(const string& folder_name, const string& instance_name, b
     auto duration_limit = std::chrono::seconds(Config::MAX_TIME_SECONDS);
     cout << problem_data.GetPermutation().size() << " customers" << "\n";
     while (std::chrono::high_resolution_clock::now() - start_time < duration_limit) {
-        if (_kbhit()) {             // 1. SprawdŸ, czy coœ wciœniêto (b³yskawiczne)
+        if (_kbhit()) {             // 1. Sprawdz, czy cos wcisnieto
             char ch = _getch();     // 2. Pobierz ten znak
-            if (ch == ' ') {        // 3. Jeœli to spacja...
+            if (ch == ' ') {        // 3. Jesli to spacja...
                 cout << "\n[!] Przerwano recznie spacja." << "\n";
-                break;              // Wyjdz z petli, kod dalej wykona zapis wynikow
+                break;              // Wyjdz z petli
             }
         }
 
@@ -162,7 +186,6 @@ int main() {
 
 	std::cout << "ulaaaaaa";
 	StartOptimization("Vrp-Set-D", "ORTEC-n323-k21", use_random_permutation);
-   // StartOptimization("Vrp-Set-XXL", "Leuven2", use_random_permutation);
+  //  StartOptimization("Vrp-Set-XXL", "Leuven2", use_random_permutation);
 	return 0;
 }
-

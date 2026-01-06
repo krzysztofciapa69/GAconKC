@@ -32,6 +32,7 @@ public:
 private:
   void IslandWorkerLoop(int island_idx);
   void PerformRingMigration();
+  void PerformDiversityPulseMigration();  // aggressive 60s migration with BPD filter
   void StopThreads();
 
   Evaluator &evaluator_;

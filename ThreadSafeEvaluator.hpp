@@ -70,6 +70,10 @@ public:
   long long GetRouteCacheHits() const { return route_cache_hits_; }
   long long GetRouteCacheMisses() const { return route_cache_misses_; }
 
+  // Constraint Accessors
+  bool HasDistanceConstraint() const { return has_distance_constraint_; }
+  double GetMaxDistance() const { return max_distance_; }
+
 private:
   // Stats
   mutable long long route_cache_hits_ = 0;

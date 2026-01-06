@@ -27,6 +27,9 @@ namespace LcVRPContest {
         }
 
         bool HasCoordinates() const { return !coordinates_.empty(); }
+        
+        // Create permutation sorted by angle from depot (for Angular Sweep initialization)
+        std::vector<int> CreateAngularPermutation(double offset_radians = 0.0) const;
 
     private:
         int id_;

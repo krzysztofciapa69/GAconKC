@@ -1,4 +1,5 @@
 ﻿#include "Mutator.hpp"
+#include "Constants.hpp"
 #include <cmath>
 #include <limits>
 
@@ -24,7 +25,7 @@ void Mutator::Initialize(ThreadSafeEvaluator *eval, const ProblemGeometry *geo,
 }
 
 bool Mutator::ApplyRuinRecreate(Individual &indiv, double intensity,
-                                std::mt19937 &rng) {
+                                bool is_exploitation, std::mt19937 &rng) {
   if (!geometry_ || !geometry_->HasCoordinates())
     return false;
 
@@ -32,16 +33,19 @@ bool Mutator::ApplyRuinRecreate(Individual &indiv, double intensity,
   int num_clients = static_cast<int>(genes.size());
   int num_groups = evaluator_->GetNumGroups();
 
-  // 1. Wybór centrum
+  // 1. wybor centrum
   int center_idx = rng() % num_clients;
 
-  // --- PRZYWRÓCONA I ULEPSZONA LOGIKA ADAPTACJI ---
-  // Minimalnie zawsze usuwamy 5 lub 10 węzłów
-  int min_rem = 5;
-
-  // Bazowy procent to 30%, maksymalny (przy pełnej stagnacji) to 70%
-  // Agresywna zmiana dla wyjścia z optimów lokalnych
-  double pct = 0.30 + (0.40 * intensity);
+  // adaptive ruin percentage based on island type
+  int min_rem = Config::RUIN_MIN_REMOVED;
+  double pct;
+  if (is_exploitation) {
+    // exploitation: smaller windows (10-25%)
+    pct = Config::RUIN_BASE_PCT_EXPLOITATION + (Config::RUIN_INTENSITY_SCALE_EXPLOITATION * intensity);
+  } else {
+    // exploration: larger windows (30-70%)
+    pct = Config::RUIN_BASE_PCT + (Config::RUIN_INTENSITY_SCALE * intensity);
+  }
 
   int max_rem = std::max(min_rem + 5, (int)(num_clients * pct));
   if (max_rem >= num_clients)
@@ -161,8 +165,8 @@ bool Mutator::ApplySmartSpatialMove(Individual &indiv, std::mt19937 &rng) {
 
   int best_target_group = -1;
 
-  // Patrzymy na 3 najbliższych sąsiadów
-  int check_limit = std::min((int)neighbors.size(), 5);
+  // Patrzymy na 15 najbliższych sąsiadów
+  int check_limit = std::min((int)neighbors.size(), 15);
   for (int k = 0; k < check_limit; ++k) {
     int neighbor_idx = neighbors[k];
     int neighbor_group = genes[neighbor_idx];

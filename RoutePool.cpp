@@ -670,14 +670,14 @@ namespace LcVRPContest {
         }
 
         Individual frankenstein(result_genotype);
-        SplitResult split_result = split.RunLinear(result_permutation);
+   /*     SplitResult split_result = split.RunLinear(result_permutation);
         if (!split_result.group_assignment.empty()) {
             for (int& g : split_result.group_assignment) {
                 if (g >= num_groups) g = g % num_groups;
             }
             frankenstein = Individual(split_result.group_assignment);
         }
-
+        */
         double fitness = evaluator->Evaluate(frankenstein.GetGenotype());
         frankenstein.SetFitness(fitness);
 

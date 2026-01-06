@@ -21,7 +21,7 @@
 
 namespace LcVRPContest {
 
-enum class INITIALIZATION_TYPE { RANDOM, CHUNKED, RR, SMART_STICKY };
+enum class INITIALIZATION_TYPE { RANDOM, CHUNKED, RR, SMART_STICKY, ANGULAR_SWEEP };
 
 class Island {
 public:
@@ -31,7 +31,9 @@ public:
   void Initialize(INITIALIZATION_TYPE strategy);
   void RunGeneration();
   void InjectImmigrant(Individual &imigrant);
+
   double EvaluateWithHistoryPenalty(const std::vector<int> &genotype);
+  void MutateIndividual(Individual& indiv);
 
   std::vector<int> GetBestSolution() const {
     std::lock_guard<std::mutex> lock(best_mutex_);
@@ -45,6 +47,7 @@ public:
   
   Individual GetRandomIndividual();
   Individual GetMostDiverseMigrantFor(const Individual& target_best);
+  Individual GetRandomEliteIndividual();  // Get random individual from top 30%
   
   double GetBestFitness() const {
     std::lock_guard<std::mutex> lock(best_mutex_);
@@ -77,6 +80,11 @@ public:
 
   long long total_comps = 0;
   long long passes = 0;
+  
+  // Public BPD wrapper for Optimizer's diversity-pulse migration
+  int CalculateBrokenPairsDistancePublic(const Individual& ind1, const Individual& ind2) {
+    return CalculateBrokenPairsDistance(ind1, ind2, evaluator_->GetPermutation(), evaluator_->GetNumGroups());
+  }
 
 #ifdef RESEARCH
   void ExportState(int generation, bool is_catastrophe) const;
@@ -114,6 +122,25 @@ private:
   long long cache_hits_ = 0;
   long long cache_misses_ = 0;
 
+  // GLS Edge Penalty (exploration islands only)
+  std::vector<int> edge_penalty_;  // flat [i * edge_dim_ + j]
+  int edge_dim_ = 0;
+  
+  void UpdateEdgePenalty(const std::vector<int>& genotype);
+  double CalculateEdgePenalty(const std::vector<int>& genotype) const;
+  void DecayEdgePenalties();  // 0.5% decay per generation
+  std::string GetTopPenalizedEdges(int count) const;  // for diagnostics
+
+  // Diagnostic counters (reset every diagnostic interval)
+  long long diag_vnd_calls_ = 0;
+  long long diag_vnd_improvements_ = 0;
+  long long diag_mutations_ = 0;
+  long long diag_strong_mutations_ = 0;
+  long long diag_crossovers_ = 0;
+  long long diag_offspring_better_ = 0;  // offspring better than median
+  long long diag_offspring_total_ = 0;
+  std::chrono::steady_clock::time_point last_diag_time_;
+
   // Timers
   std::chrono::steady_clock::time_point start_time_;
   std::chrono::steady_clock::time_point last_alns_print_time_;
@@ -145,6 +172,8 @@ private:
   long long current_generation_ = 0;
   long long last_improvement_gen_ = 0;
   long long last_catastrophy_gen_ = 0;
+  std::chrono::steady_clock::time_point immune_until_time_;  // no migration until this time
+  std::chrono::steady_clock::time_point last_improvement_time_;  // for dynamic immunity
 
   const int BASE_STAGNATION_LIMIT = 1000;
 
@@ -164,7 +193,7 @@ private:
   double GetMutationRate() const;
   double GetRuinChance() const;
   double GetMicrosplitChance() const;
-  bool ShouldTrackDiversity() const { return true; } 
+  bool ShouldTrackDiversity() const { return current_generation_%10 == 0?  true: false; } 
 
   int ApplyLoadBalancing(Individual &child);
 
@@ -192,6 +221,7 @@ private:
 
   int ApplyMutation(Individual &child, bool is_endgame);
   int ApplyMicroSplitMutation(Individual &child);
+  bool ApplyMergeRegret(Individual& ind);  // dissolve 2 routes and repair with Regret-3
 
   bool ApplyLoadBalancingSwapMutation(Individual &individual);
   bool ApplyLoadBalancingChainMutation(Individual &individual);
@@ -245,6 +275,9 @@ private:
   long long crossovers = 0;
   long long load_balancing_activations = 0;
 #endif
+
+  // Track RoutePool updates for Frankenstein trigger
+  size_t last_routes_added_snapshot_ = 0;
 };
 
 } // namespace LcVRPContest
