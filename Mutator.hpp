@@ -7,7 +7,6 @@
 #include <random>
 #include <vector>
 
-
 namespace LcVRPContest {
 
 class Mutator {
@@ -58,18 +57,14 @@ private:
   Split *split_ptr_;
 
   // --- BUFORY PAMIĘCI (Unikanie alokacji w pętli - Cache Friendly) ---
-  struct GroupInfo {
-    double sum_x = 0;
-    double sum_y = 0;
-    int count = 0;
-  };
-
   std::vector<int> removed_indices_buffer_;
   std::vector<bool> is_removed_buffer_;
-  std::vector<GroupInfo> group_centroids_buffer_;
 
   // Pomocnicze bufory dla SmartMove
   std::vector<int> candidates_buffer_;
+
+  // Buffer for neighbor voting in RuinRecreate
+  std::vector<int> group_votes_buffer_;
 };
 
 } // namespace LcVRPContest

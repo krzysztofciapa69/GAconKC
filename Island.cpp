@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -11,7 +12,6 @@
 #include <numeric>
 #include <sstream>
 #include <unordered_set>
-#include <cstdint>
 
 using namespace LcVRPContest;
 using namespace std;
@@ -70,10 +70,6 @@ Island::Island(ThreadSafeEvaluator *evaluator, const ProblemData &data,
     }
   }
 
-  // GLS: Initialize edge penalty table (exploration islands only)
-  edge_dim_ = dim + 2;  // +2 for depot (index 0 and 1)
-  edge_penalty_.resize(edge_dim_ * edge_dim_, 0);
-
   start_time_ = std::chrono::steady_clock::now();
   last_alns_print_time_ = std::chrono::steady_clock::now();
   last_greedy_assembly_time_ = std::chrono::steady_clock::now();
@@ -109,10 +105,6 @@ double Island::SafeEvaluate(const std::vector<int> &genotype) {
 
   if (local_cache_.TryGet(genotype, distance, returns)) {
     cache_hits_++;
-    // GLS: add edge penalty for exploration islands (selection pressure)
-    if (IsExploration()) {
-      return distance + CalculateEdgePenalty(genotype);
-    }
     return distance;
   }
   cache_misses_++;
@@ -126,10 +118,6 @@ double Island::SafeEvaluate(const std::vector<int> &genotype) {
   }
   local_cache_.Insert(genotype, distance, returns);
 
-  // GLS: add edge penalty for exploration islands
-  if (IsExploration()) {
-    return distance + CalculateEdgePenalty(genotype);
-  }
   return distance;
 }
 
@@ -142,11 +130,7 @@ double Island::SafeEvaluate(Individual &indiv) {
   if (local_cache_.TryGet(indiv.AccessGenotype(), distance, returns)) {
     cache_hits_++;
     indiv.SetReturnCount(returns);
-    indiv.SetFitness(distance);  // raw fitness
-    // GLS: return penalized fitness for selection
-    if (IsExploration()) {
-      return distance + CalculateEdgePenalty(indiv.GetGenotype());
-    }
+    indiv.SetFitness(distance); // raw fitness
     return distance;
   }
   cache_misses_++;
@@ -161,243 +145,17 @@ double Island::SafeEvaluate(Individual &indiv) {
   }
 
   indiv.SetReturnCount(returns);
-  indiv.SetFitness(distance);  // raw fitness
+  indiv.SetFitness(distance); // raw fitness
 
   local_cache_.Insert(indiv.AccessGenotype(), distance, returns);
 
-  // GLS: return penalized fitness for selection
-  if (IsExploration()) {
-    return distance + CalculateEdgePenalty(indiv.GetGenotype());
-  }
   return distance;
-}
-
-// === GLS: EDGE PENALTY METHODS ===
-
-void Island::UpdateEdgePenalty(const std::vector<int>& genotype) {
-  if (!IsExploration()) return;
-  
-  const auto& perm = evaluator_->GetPermutation();
-  int num_groups = evaluator_->GetNumGroups();
-  int my_bucket = (id_ / 2) % 3;  // I0->0, I2->1, I4->2
-  
-  // build routes from genotype
-  std::vector<std::vector<int>> routes(num_groups);
-  for (size_t i = 0; i < genotype.size(); ++i) {
-    int customer_id = perm[i];
-    if (customer_id < 2) continue;
-    int group = genotype[i];
-    if (group >= 0 && group < num_groups) {
-      routes[group].push_back(customer_id);
-    }
-  }
-  
-  // increment penalty ONLY for customer->customer edges in our bucket
-  for (int g = 0; g < num_groups; ++g) {
-    if (routes[g].size() < 2) continue;  // need at least 2 customers for c->c edge
-    for (size_t k = 0; k + 1 < routes[g].size(); ++k) {
-      int from = routes[g][k];
-      int to = routes[g][k + 1];
-      // modulo filtering: each island penalizes different 1/3 of edges
-      int edge_bucket = (from * 997 + to) % 3;
-      if (edge_bucket == my_bucket) {
-        if (from >= 0 && from < edge_dim_ && to >= 0 && to < edge_dim_) {
-          edge_penalty_[from * edge_dim_ + to] += 100;
-        }
-      }
-    }
-  }
-  
-  // DYNAMIC GLS LIMIT: 0.5% of global best per edge
-  // This ensures penalties are proportional to problem scale
-  double best_fit = 310000.0;  // fallback
-  {
-    std::lock_guard<std::mutex> lock(best_mutex_);
-    if (current_best_.GetFitness() > 0 && current_best_.GetFitness() < 1e9) {
-      best_fit = current_best_.GetFitness();
-    }
-  }
-  // GLS limit = (best_fit / num_vehicles) * factor * stagnation_boost
-  // At 310k/21 vehicles = 14700 avg route, * 0.15 = ~2200 penalty per edge
-  int num_vehicles = evaluator_->GetNumGroups();
-  int base_limit = static_cast<int>((best_fit / std::max(1, num_vehicles)) * Config::GLS_PENALTY_FACTOR);
-  
-  // STAGNATION BOOST: penalty grows with stagnation to break stuck structures
-  // At 3000 gens stagnation: 1 + 3000/500 = 7x penalty (~15000)
-  long long stagnation = current_generation_ - last_improvement_gen_;
-  double stag_multiplier = 1.0 + static_cast<double>(stagnation) / 500.0;
-  stag_multiplier = std::min(10.0, stag_multiplier);  // cap at 10x
-  
-  int dynamic_limit = static_cast<int>(base_limit * stag_multiplier);
-  if (dynamic_limit < 1500) dynamic_limit = 1500;  // floor
-  if (dynamic_limit > 50000) dynamic_limit = 50000;  // ceiling
-  
-  // relative normalization: rescale all penalties if max exceeds dynamic threshold
-  int max_penalty = 0;
-  for (int p : edge_penalty_) {
-    if (p > max_penalty) max_penalty = p;
-  }
-  if (max_penalty > dynamic_limit) {
-    double scale = static_cast<double>(dynamic_limit) / max_penalty;
-    for (int& p : edge_penalty_) {
-      p = static_cast<int>(p * scale);
-    }
-  }
-  
-  // GLS DECAY - DISABLED (keep only stagnation boost)
-  // static long long last_decay_stag = 0;
-  // long long decay_interval = 500;
-  // if (stagnation > last_decay_stag + decay_interval) {
-  //   for (int& p : edge_penalty_) {
-  //     p = static_cast<int>(p * 0.9);
-  //   }
-  //   last_decay_stag = stagnation;
-  // }
-}
-
-double Island::CalculateEdgePenalty(const std::vector<int>& genotype) const {
-  if (!IsExploration()) return 0.0;
-  
-  // ENDGAME MODE: Disable penalties to allow pure exploitation
-  auto now = std::chrono::steady_clock::now();
-  double elapsed = std::chrono::duration<double>(now - start_time_).count();
-  if (elapsed > Config::MAX_TIME_SECONDS * Config::ENDGAME_THRESHOLD) return 0.0;
-  
-  double penalty = 0.0;
-  double lambda = Config::EDGE_PENALTY_LAMBDA;  // simple: 0.5 per penalty point
-  int my_bucket = (id_ / 2) % 3;
-  
-  const auto& perm = evaluator_->GetPermutation();
-  int num_groups = evaluator_->GetNumGroups();
-  
-  std::vector<std::vector<int>> routes(num_groups);
-  for (size_t i = 0; i < genotype.size(); ++i) {
-    int customer_id = perm[i];
-    if (customer_id < 2) continue;
-    int group = genotype[i];
-    if (group >= 0 && group < num_groups) {
-      routes[group].push_back(customer_id);
-    }
-  }
-  
-  // sum penalty ONLY for customer->customer edges in our bucket
-  for (int g = 0; g < num_groups; ++g) {
-    if (routes[g].size() < 2) continue;
-    for (size_t k = 0; k + 1 < routes[g].size(); ++k) {
-      int from = routes[g][k];
-      int to = routes[g][k + 1];
-      int edge_bucket = (from * 997 + to) % 3;
-      if (edge_bucket == my_bucket) {
-        if (from >= 0 && from < edge_dim_ && to >= 0 && to < edge_dim_) {
-          penalty += edge_penalty_[from * edge_dim_ + to] * lambda;
-        }
-      }
-    }
-  }
-  
-  return penalty;
-}
-
-void Island::DecayEdgePenalties() {
-  if (!IsExploration()) return;
-  
-  // FIX: Decay only every 100 generations to break the "equilibrium trap"
-  // This allows penalties to accumulate significantly before being reduced
-  if (current_generation_ % 100 != 0) return;
-  
-  double decay = Config::EDGE_PENALTY_DECAY;
-  for (auto& p : edge_penalty_) {
-    p = static_cast<int>(p * decay);
-  }
-}
-
-std::string Island::GetTopPenalizedEdges(int count) const {
-  if (!IsExploration()) return "";
-  
-  // collect (penalty, i, j) tuples
-  std::vector<std::tuple<int, int, int>> edges;
-  edges.reserve(edge_dim_ * edge_dim_ / 4);
-  
-  for (int i = 0; i < edge_dim_; ++i) {
-    for (int j = 0; j < edge_dim_; ++j) {
-      int p = edge_penalty_[i * edge_dim_ + j];
-      if (p > 0) {
-        edges.emplace_back(p, i, j);
-      }
-    }
-  }
-  
-  // sort by penalty descending
-  std::sort(edges.begin(), edges.end(), 
-    [](const std::tuple<int,int,int>& a, const std::tuple<int,int,int>& b) {
-      return std::get<0>(a) > std::get<0>(b);
-    });
-  
-  // build string of top N (C++14 compatible - no structured bindings)
-  std::ostringstream oss;
-  int shown = std::min(count, (int)edges.size());
-  for (int k = 0; k < shown; ++k) {
-    int p = std::get<0>(edges[k]);
-    int from = std::get<1>(edges[k]);
-    int to = std::get<2>(edges[k]);
-    if (k > 0) oss << " ";
-    oss << from << "->" << to << ":" << p;
-  }
-  
-  return oss.str();
 }
 
 void Island::InitIndividual(Individual &indiv, INITIALIZATION_TYPE strategy) {
   int num_groups = evaluator_->GetNumGroups();
   std::vector<int> &genes = indiv.AccessGenotype();
   int num_clients = static_cast<int>(genes.size());
-
-  if (strategy == INITIALIZATION_TYPE::ANGULAR_SWEEP) {
-    // Use different angle offset per island for diversity (60° each)
-    double offset = (2.0 * M_PI / 6.0) * id_;
-    // Add small random noise
-    std::uniform_real_distribution<double> noise_dist(-0.3, 0.3);
-    offset += noise_dist(rng_);
-    
-    std::vector<int> angular_perm = geometry_.CreateAngularPermutation(offset);
-    if (angular_perm.size() > 1) {
-       // Simple Sequential Fill (Next Fit)
-       int current_group = 0;
-       int current_load = 0;
-       int capacity = evaluator_->GetCapacity();
-       bool feasible = true;
-       std::vector<int> temp_genes(num_clients);
-
-       for (size_t pos = 0; pos < angular_perm.size(); ++pos) {
-           int customer_id = angular_perm[pos];
-           if (customer_id < 2) continue; // Skip depot
-           
-           int demand = evaluator_->GetDemand(customer_id);
-           if (current_load + demand <= capacity) {
-               current_load += demand;
-           } else {
-               current_group++;
-               current_load = demand;
-               if (current_group >= num_groups) {
-                   feasible = false;
-                   break;
-               }
-           }
-           
-           int gene_idx = customer_id - 2;
-           if (gene_idx >= 0 && gene_idx < num_clients) {
-               temp_genes[gene_idx] = current_group;
-           }
-       }
-
-       if (feasible) {
-           genes = temp_genes;
-           return;
-       }
-    }
-    // Fallback to random if Angular Sweep failed or ran out of vehicles
-    strategy = INITIALIZATION_TYPE::RANDOM;
-  }
 
   if (strategy == INITIALIZATION_TYPE::SMART_STICKY) {
     InitIndividualSmartSticky(indiv);
@@ -417,7 +175,8 @@ void Island::InitIndividual(Individual &indiv, INITIALIZATION_TYPE strategy) {
         assignment_pool.push_back(i % num_groups);
       }
     } else if (strategy == INITIALIZATION_TYPE::CHUNKED) {
-      int chunk_size = (num_groups > 0) ? (num_clients / num_groups) : num_clients;
+      int chunk_size =
+          (num_groups > 0) ? (num_clients / num_groups) : num_clients;
       int current_group = 0;
       for (int i = 0; i < num_clients; ++i) {
         genes[i] = current_group;
@@ -465,7 +224,7 @@ void Island::InitIndividualSmartSticky(Individual &indiv) {
       total_dist += evaluator_->GetDist(u_idx, v_idx);
     }
   }
-  
+
   double avg_seq_dist = total_dist / (double)std::max(1, (int)perm.size() - 1);
   double random_factor = std::uniform_real_distribution<double>(0.5, 1.0)(rng_);
   double sticky_threshold = avg_seq_dist * random_factor;
@@ -475,10 +234,12 @@ void Island::InitIndividualSmartSticky(Individual &indiv) {
 
   for (size_t i = 0; i < perm.size(); ++i) {
     int customer_id = perm[i];
-    if (customer_id <= 1) continue;
+    if (customer_id <= 1)
+      continue;
 
     int gene_idx = customer_id - 2;
-    if (gene_idx < 0 || gene_idx >= num_clients) continue;
+    if (gene_idx < 0 || gene_idx >= num_clients)
+      continue;
 
     int demand = evaluator_->GetDemand(customer_id);
     bool keep_same_group = false;
@@ -509,7 +270,8 @@ void Island::InitIndividualSmartSticky(Individual &indiv) {
             break;
           }
         }
-        if (!found) current_group = candidates[0];
+        if (!found)
+          current_group = candidates[0];
       }
     } else {
       current_group = rng_() % num_groups;
@@ -540,31 +302,14 @@ void Island::Initialize(INITIALIZATION_TYPE strategy) {
     }
   }
 
-  // Track best Angular Sweep individual for logging
-  double best_angular_fit = std::numeric_limits<double>::max();
-  int angular_count = 0;
-  
-  // Only 1 Angular Sweep individual per island (more is harmful with MDS coordinates)
-  // Rest: Random (for diversity)
-  int angular_sweep_count = 1;
-  
+  // Initialize remaining population with random individuals
   for (int i = 0; i < population_size_ - 1; ++i) {
     Individual indiv(sol_size);
-    
-    if (i < angular_sweep_count && geometry_.HasCoordinates()) {
-      InitIndividual(indiv, INITIALIZATION_TYPE::ANGULAR_SWEEP);
-      angular_count++;
-    } else {
-      InitIndividual(indiv, INITIALIZATION_TYPE::RANDOM);
-    }
+    InitIndividual(indiv, INITIALIZATION_TYPE::RANDOM);
 
     double fit = SafeEvaluate(indiv);
     indiv.SetFitness(fit);
     population_.push_back(indiv);
-
-    if (i < angular_sweep_count && fit < best_angular_fit) {
-      best_angular_fit = fit;
-    }
 
     if (fit < current_best_.GetFitness()) {
       std::lock_guard<std::mutex> lock(best_mutex_);
@@ -572,58 +317,66 @@ void Island::Initialize(INITIALIZATION_TYPE strategy) {
     }
   }
 
-  // Log Angular Sweep results
-  if (angular_count > 0) {
-    std::cout << "[Island " << id_ << "] Angular Sweep Init: " << angular_count 
-              << " individuals, best=" << std::fixed << std::setprecision(0) << best_angular_fit << "\n";
-  }
-
   UpdateBiasedFitness();
+
+  /*
+  std::vector<int> test = { 5,16,2,12,10,20,15,11,11,11,13,8,14,7,6,11,20,1,5,11,14,0,8,1,9,0,4,7,17,1,13,2,3,14,14,17,9,11,10,3,6,18,5,16,17,13,10,3,3,8,18,20,1,18,14,20,9,4,3,6,4,12,13,5,3,0,18,19,15,8,14,20,18,7,11,1,5,8,19,9,
+8,6,6,12,20,7,8,19,4,4,13,6,20,19,5,0,18,5,0,5,18,17,0,0,9,15,10,20,13,1,7,6,16,12,2,4,17,15,3,3,0,1,9,12,1,8,0,15,5,12,2,6,0,7,4,1,14,7,0,14,10,4,19,17,3,19,16,1,15,18,6,8,12,18,9,10,6,2,10,1,4,13,3,7,16,20,6,7,16,14,12,19,0,13,
+19,20,11,9,9,3,6,1,15,16,15,9,7,18,4,3,18,8,11,3,9,10,7,12,12,11,6,18,16,4,12,13,19,15,9,19,16,14,5,10,14,9,6,10,2,5,9,12,19,17,17,14,19,17,15,15,9,8,7,20,20,2,5,13,8,6,11,14,15,19,8,16,11,2,1,11,13,16,19,8,18,15,16,19,12,0,2,4,17,7,18,14,0,
+17,9,12,4,10,10,10,3,20,9,8,2,14,3,10,6,8,2,6,18,5,11,19,0,20,13,10,10,14,4,20,1,2,17,16,0,1,12,18,3,2,20,15,13,12,15,9,13,17,4,1,1,8,2,11 };
+  Individual testInd(test);
+  cout << "WYNIK TEST: \n";
+  cout << SafeEvaluate(testInd);
+  cout<<"po vnd: :";
+  local_search_.RunVND(testInd);
+  cout << SafeEvaluate(testInd) << "\n";*/
 }
 
 void Island::RunGeneration() {
   current_generation_++;
 
   if (ShouldTrackDiversity()) {
-      UpdateBiasedFitness();
-      UpdateAdaptiveParameters();
+    UpdateBiasedFitness();
+    UpdateAdaptiveParameters();
   }
   stagnation_count_++;
 
-  // GLS: decay edge penalties for exploration islands
-  DecayEdgePenalties();
-
   // === DIAGNOSTIC LOGGING (every 30s per island) ===
   auto now_diag = std::chrono::steady_clock::now();
-  double since_last_diag = std::chrono::duration<double>(now_diag - last_diag_time_).count();
+  double since_last_diag =
+      std::chrono::duration<double>(now_diag - last_diag_time_).count();
   if (since_last_diag >= 30.0 && current_generation_ > 10) {
     last_diag_time_ = now_diag;
-    double elapsed = std::chrono::duration<double>(now_diag - start_time_).count();
-    
+    double elapsed =
+        std::chrono::duration<double>(now_diag - start_time_).count();
+
     // Calculate unique genotypes in population
     std::unordered_set<uint64_t> unique_hashes;
     double best_pop_fit = 1e18, worst_pop_fit = 0;
     double sum_fit = 0;
     {
       std::lock_guard<std::mutex> lock(population_mutex_);
-      for (const auto& ind : population_) {
+      for (const auto &ind : population_) {
         uint64_t h = HashGenotype64(ind.GetGenotype());
         unique_hashes.insert(h);
         double f = ind.GetFitness();
         sum_fit += f;
-        if (f < best_pop_fit) best_pop_fit = f;
-        if (f > worst_pop_fit) worst_pop_fit = f;
+        if (f < best_pop_fit)
+          best_pop_fit = f;
+        if (f > worst_pop_fit)
+          worst_pop_fit = f;
       }
     }
     int unique_count = (int)unique_hashes.size();
     double unique_pct = 100.0 * unique_count / population_size_;
     double fitness_spread = worst_pop_fit - best_pop_fit;
     double avg_fit = sum_fit / population_size_;
-    
+
     // Stagnation metrics
     long long gens_since_improve = current_generation_ - last_improvement_gen_;
-    double stagnation_rate = (elapsed > 0) ? (double)gens_since_improve / elapsed : 0;
-    
+    double stagnation_rate =
+        (elapsed > 0) ? (double)gens_since_improve / elapsed : 0;
+
     // Current best vs global best gap
     double global_best;
     {
@@ -631,71 +384,67 @@ void Island::RunGeneration() {
       global_best = current_best_.GetFitness();
     }
     double gap_to_best = best_pop_fit - global_best;
-    
-    double vnd_success_rate = (diag_vnd_calls_ > 0) ? (100.0 * diag_vnd_improvements_ / diag_vnd_calls_) : 0.0;
-    double strong_mut_pct = (diag_mutations_ > 0) ? (100.0 * diag_strong_mutations_ / diag_mutations_) : 0.0;
-    double better_pct = (diag_offspring_total_ > 0) ? (100.0 * diag_offspring_better_ / diag_offspring_total_) : 0.0;
-    
+
+    double vnd_success_rate =
+        (diag_vnd_calls_ > 0)
+            ? (100.0 * diag_vnd_improvements_ / diag_vnd_calls_)
+            : 0.0;
+    double strong_mut_pct =
+        (diag_mutations_ > 0)
+            ? (100.0 * diag_strong_mutations_ / diag_mutations_)
+            : 0.0;
+    double better_pct =
+        (diag_offspring_total_ > 0)
+            ? (100.0 * diag_offspring_better_ / diag_offspring_total_)
+            : 0.0;
+
     // Diagnose problems
     std::string issues = "";
-    if (unique_pct < 30.0) issues += "[CLONE_FLOOD] ";
-    if (vnd_success_rate < 5.0 && diag_vnd_calls_ > 50) issues += "[VND_STUCK] ";
-    if (gens_since_improve > 500 && IsExploitation()) issues += "[STAGNANT] ";
-    if (fitness_spread < 100 && IsExploration()) issues += "[LOW_DIVERSITY] ";
-    if (better_pct < 10.0 && diag_offspring_total_ > 50) issues += "[POOR_OFFSPRING] ";
-    if (gap_to_best > 5000 && IsExploitation()) issues += "[LAGGING] ";
-    
-    std::cout << " [DIAG I" << id_ << " " << (IsExploration() ? "EXP" : "EXT") << "] "
-              << "VND: " << diag_vnd_improvements_ << "/" << diag_vnd_calls_ << " (" << std::fixed << std::setprecision(0) << vnd_success_rate << "%) | "
-              << "Uniq: " << unique_count << "/" << population_size_ << " (" << std::setprecision(0) << unique_pct << "%) | "
-              << "Spread: " << std::setprecision(0) << fitness_spread << " | "
+    if (unique_pct < 30.0)
+      issues += "[CLONE_FLOOD] ";
+    if (vnd_success_rate < 5.0 && diag_vnd_calls_ > 50)
+      issues += "[VND_STUCK] ";
+    if (gens_since_improve > 500 && IsExploitation())
+      issues += "[STAGNANT] ";
+    if (fitness_spread < 100 && IsExploration())
+      issues += "[LOW_DIVERSITY] ";
+    if (better_pct < 10.0 && diag_offspring_total_ > 50)
+      issues += "[POOR_OFFSPRING] ";
+    if (gap_to_best > 5000 && IsExploitation())
+      issues += "[LAGGING] ";
+
+    // Crossover success rates
+    double srex_rate = (diag_srex_calls_ > 0) ? (100.0 * diag_srex_wins_ / diag_srex_calls_) : 0.0;
+    double neighbor_rate = (diag_neighbor_calls_ > 0) ? (100.0 * diag_neighbor_wins_ / diag_neighbor_calls_) : 0.0;
+
+    std::cout << " [DIAG I" << id_ << " " << (IsExploration() ? "EXP" : "EXT")
+              << "] "
+              << "VND: " << diag_vnd_improvements_ << "/" << diag_vnd_calls_
+              << " (" << std::fixed << std::setprecision(0) << vnd_success_rate
+              << "%) | "
+              << "XO: SREX " << diag_srex_wins_ << "/" << diag_srex_calls_ << "(" << std::setprecision(0) << srex_rate << "%) "
+              << "NBR " << diag_neighbor_wins_ << "/" << diag_neighbor_calls_ << "(" << std::setprecision(0) << neighbor_rate << "%) | "
+              << "Uniq: " << unique_count << "/" << population_size_ << " ("
+              << std::setprecision(0) << unique_pct << "%) | "
               << "Gap: " << std::setprecision(0) << gap_to_best << " | "
-              << "Stag: " << gens_since_improve << "g | "
-              << "Better: " << std::setprecision(0) << better_pct << "% ";
+              << "Stag: " << gens_since_improve << "g ";
     if (!issues.empty()) {
       std::cout << "\033[31m" << issues << "\033[0m";
     }
     std::cout << "\n";
-    
-    // GLS: log top 5 penalized edges for exploration islands
-    if (IsExploration()) {
-      std::string top_edges = GetTopPenalizedEdges(5);
-      std::cout << "        [GLS I" << id_ << "] TopEdges: " 
-                << (top_edges.empty() ? "(none yet)" : top_edges) << "\n";
-    }
-    
+
     // Reset counters
     diag_vnd_calls_ = diag_vnd_improvements_ = 0;
     diag_mutations_ = diag_strong_mutations_ = 0;
     diag_crossovers_ = diag_offspring_better_ = diag_offspring_total_ = 0;
+    diag_srex_calls_ = diag_srex_wins_ = 0;
+    diag_neighbor_calls_ = diag_neighbor_wins_ = 0;
   }
 
-
-
-  {
-    std::lock_guard<std::mutex> lock(population_mutex_);
-    if (!immigration_queue_.empty()) {
-      for (auto &immigrant : immigration_queue_) {
-        // [ANTI-CLONE] Reject if duplicate exists
-        if (ContainsSolution(immigrant)) continue;
-
-        int worst = GetWorstBiasedIndex();
-        if (worst >= 0 && worst < (int)population_.size()) {
-          if (immigrant.GetFitness() < population_[worst].GetFitness()) {
-            population_[worst] = immigrant;
-            {
-              std::lock_guard<std::mutex> best_lock(best_mutex_);
-              if (immigrant.GetFitness() < current_best_.GetFitness()) {
-                current_best_ = immigrant;
-              }
-            }
-          }
-        }
-      }
-      UpdateBiasedFitness();
-      immigration_queue_.clear();
-    }
-  }
+  // ASYNCHRONOUS MIGRATION: Try to pull migrant from predecessor when stuck
+  // (immigration_queue_ no longer used - migrants are injected directly in
+  // InjectImmigrant)
+  TryPullMigrant();
 
   const int lambda = population_size_;
   std::vector<Individual> offspring_pool;
@@ -708,8 +457,9 @@ void Island::RunGeneration() {
 
   auto now = std::chrono::steady_clock::now();
   double elapsed = std::chrono::duration<double>(now - start_time_).count();
-  bool is_endgame = (elapsed > Config::MAX_TIME_SECONDS * Config::ENDGAME_THRESHOLD);
-  
+  bool is_endgame =
+      (elapsed > Config::MAX_TIME_SECONDS * Config::ENDGAME_THRESHOLD);
+
   std::uniform_real_distribution<double> d(0.0, 1.0);
 
   for (int i = 0; i < lambda; ++i) {
@@ -717,9 +467,25 @@ void Island::RunGeneration() {
     int p1 = SelectParentIndex();
     int p2 = SelectParentIndex();
 
+    // Track crossover type: 0=none, 1=SREX, 2=Neighbor
+    int crossover_type = 0;
+    double parent1_fit = 0, parent2_fit = 0;
+
     if (p1 >= 0 && p2 >= 0) {
-      child = is_endgame ? CrossoverSpatial(population_[p1], population_[p2]) 
-                         : Crossover(population_[p1], population_[p2]);
+      parent1_fit = population_[p1].GetFitness();
+      parent2_fit = population_[p2].GetFitness();
+      
+      if (is_endgame) {
+        child = CrossoverNeighborBased(population_[p1], population_[p2]);
+        crossover_type = 2; // Neighbor
+      } else {
+        // Determine which crossover will be used (replicated logic from Crossover)
+        std::uniform_real_distribution<double> dist_xo(0.0, 1.0);
+        double r = dist_xo(rng_);
+        double sequence_prob = (id_ <= 1) ? 0.31 : ((id_ <= 3) ? 0.4 : 0.6);
+        crossover_type = (r < sequence_prob) ? 1 : 2; // 1=SREX, 2=Neighbor
+        child = Crossover(population_[p1], population_[p2]);
+      }
     } else {
       InitIndividual(child, INITIALIZATION_TYPE::RANDOM);
     }
@@ -728,12 +494,17 @@ void Island::RunGeneration() {
     int mutation_result = ApplyMutation(child, is_endgame);
     bool mutated = (mutation_result > 0);
     bool strong_mutation = (mutation_result == 2);
-    
-    // Diagnostic tracking
-    if (mutated) diag_mutations_++;
-    if (strong_mutation) diag_strong_mutations_++;
-    diag_crossovers_++;
 
+    // Diagnostic tracking
+    if (mutated)
+      diag_mutations_++;
+    if (strong_mutation)
+      diag_strong_mutations_++;
+    diag_crossovers_++;
+    
+    // Cache problem size for this iteration
+    int problem_size = evaluator_->GetSolutionSize();
+    
     child.Canonicalize();
     double fit = 0;
     int ret = 0;
@@ -749,40 +520,76 @@ void Island::RunGeneration() {
     child.SetFitness(fit);
     child.SetReturnCount(ret);
 
+    // Track crossover success: child better than BOTH parents (before mutation/VND)
+    if (crossover_type > 0 && parent1_fit > 0 && parent2_fit > 0) {
+      double worse_parent = std::max(parent1_fit, parent2_fit);
+      if (fit < parent1_fit && fit < parent2_fit) {
+        if (crossover_type == 1) diag_srex_wins_++;
+        else diag_neighbor_wins_++;
+      }
+      if (crossover_type == 1) diag_srex_calls_++;
+      else diag_neighbor_calls_++;
+    }
+
     bool promising = (fit < fitness_threshold);
-    double vnd_prob = IsExploration() ? Config::EXPLORATION_VND_PROB 
-                                      : Config::EXPLOITATION_VND_PROB;
-    bool exploration_vnd = IsExploration() && (promising || (d(rng_) < Config::EXPLORATION_VND_EXTRA_PROB));
+    
+    // VND probability - drastically reduced for large instances
+    double vnd_prob;
+    if (problem_size > Config::LARGE_INSTANCE_THRESHOLD) {
+      vnd_prob = IsExploration() ? Config::EXPLORATION_VND_PROB_LARGE
+                                 : Config::EXPLOITATION_VND_PROB_LARGE;
+    } else {
+      vnd_prob = IsExploration() ? Config::EXPLORATION_VND_PROB
+                                 : Config::EXPLOITATION_VND_PROB;
+    }
+    
+    bool exploration_vnd =
+        IsExploration() &&
+        (promising || (d(rng_) < Config::EXPLORATION_VND_EXTRA_PROB));
+    
+    // Skip VND entirely for exploration on huge instances
+    if (problem_size > Config::HUGE_INSTANCE_THRESHOLD && IsExploration()) {
+      exploration_vnd = false;
+    }
+    
     bool should_run_vnd = exploration_vnd || strong_mutation ||
-                          (IsExploitation() && promising) || (d(rng_) < vnd_prob) || is_endgame;
+                          (IsExploitation() && promising) ||
+                          (d(rng_) < vnd_prob) || is_endgame;
 
     if (should_run_vnd) {
       int vnd_iters = GetVndIterations();
       if (is_endgame) {
-          vnd_iters = Config::EXPLOITATION_VND_MAX; // Max power in endgame
+        vnd_iters = Config::EXPLOITATION_VND_MAX; // Max power in endgame
       } else if (current_structural_diversity_ > 0.6) {
-          vnd_iters = (int)(vnd_iters * 1.5);
+        vnd_iters = (int)(vnd_iters * 1.5);
       }
       bool allow_swap = IsExploitation() && Config::ALLOW_SWAP;
-      bool allow_3swap = IsExploitation() && Config::ALLOW_3SWAP && !strong_mutation;
-      bool allow_ejection = IsExploitation() && Config::ALLOW_EJECTION;
+      
+      // Disable expensive operators for large instances (reuse problem_size from above)
+      bool allow_3swap = IsExploitation() && Config::ALLOW_3SWAP && 
+                         !strong_mutation && (problem_size < Config::LARGE_INSTANCE_THRESHOLD);
+      bool allow_ejection = IsExploitation() && Config::ALLOW_EJECTION && 
+                            (problem_size < Config::LARGE_INSTANCE_THRESHOLD);
 
       // Set guide solution for Path Relinking ONLY for exploitation islands
       // Explorers skip PR entirely (too slow for their purpose)
-      if (IsExploitation()) {
+      // Also skip for large instances (n >= 1500)
+      if (IsExploitation() && problem_size < Config::LARGE_INSTANCE_THRESHOLD) {
         std::lock_guard<std::mutex> lock(best_mutex_);
         local_search_.SetGuideSolution(current_best_.GetGenotype());
       } else {
-        local_search_.SetGuideSolution({});  // Empty guide = no PR
+        local_search_.SetGuideSolution({}); // Empty guide = no PR
       }
 
       diag_vnd_calls_++;
       double fit_before = child.GetFitness();
-      if (local_search_.RunVND(child, vnd_iters, allow_swap, allow_3swap, allow_ejection)) {
+      if (local_search_.RunVND(child, vnd_iters, allow_swap, allow_3swap,
+                               allow_ejection)) {
         child.Canonicalize();
         if (!local_cache_.TryGet(child.GetGenotype(), fit, ret)) {
           cache_misses_++;
-          EvaluationResult res = evaluator_->EvaluateWithStats(child.GetGenotype());
+          EvaluationResult res =
+              evaluator_->EvaluateWithStats(child.GetGenotype());
           fit = res.fitness;
           ret = res.returns;
           local_cache_.Insert(child.GetGenotype(), fit, ret);
@@ -791,20 +598,15 @@ void Island::RunGeneration() {
         }
         child.SetFitness(fit);
         child.SetReturnCount(ret);
-        if (fit < fit_before) diag_vnd_improvements_++;
-        
-         // GLS: Update penalty for Local Optima found by VND (if stuck)
-         // Only penalize if we are in exploration mode and not improving globally
-         if (IsExploration() && stagnation_count_ > Config::GLS_STAGNATION_TRIGGER) {
-             // Penalize this local optimum. This is "breathing" - finding LO, penalizing it, leaving it.
-             UpdateEdgePenalty(child.GetGenotype()); 
-         }
+        if (fit < fit_before)
+          diag_vnd_improvements_++;
       }
     }
-    
+
     // Track offspring quality
     diag_offspring_total_++;
-    if (fit < fitness_threshold) diag_offspring_better_++;
+    if (fit < fitness_threshold)
+      diag_offspring_better_++;
 
     offspring_pool.push_back(std::move(child));
 
@@ -820,8 +622,8 @@ void Island::RunGeneration() {
       }
     }
   }
-  
-  // GLS: update edge penalty removed from here. 
+
+  // GLS: update edge penalty removed from here.
   // We now penalize effective Local Optima inside the loop.
   // if (stagnation_count_ > 0 && IsExploration()) {
   //     std::lock_guard<std::mutex> lock(best_mutex_);
@@ -832,9 +634,9 @@ void Island::RunGeneration() {
 
   {
     std::lock_guard<std::mutex> lock(population_mutex_);
-    for (auto &ind : population_) ind.IncrementStagnation();
+    for (auto &ind : population_)
+      ind.IncrementStagnation();
   }
-
 
   long long time_since = current_generation_ - last_improvement_gen_;
   long long time_since_cat = current_generation_ - last_catastrophy_gen_;
@@ -842,7 +644,9 @@ void Island::RunGeneration() {
   double worst_fit = 0.0;
   {
     std::lock_guard<std::mutex> lock(population_mutex_);
-    for (const auto &ind : population_) if (ind.GetFitness() > worst_fit) worst_fit = ind.GetFitness();
+    for (const auto &ind : population_)
+      if (ind.GetFitness() > worst_fit)
+        worst_fit = ind.GetFitness();
   }
 
   double best_fit_for_catastrophe;
@@ -850,101 +654,131 @@ void Island::RunGeneration() {
     std::lock_guard<std::mutex> lock(best_mutex_);
     best_fit_for_catastrophe = current_best_.GetFitness();
   }
-  
+
   // Unified Catastrophe: Trigger only on long stagnation (>3000g)
   bool stagnation_trigger = (time_since > Config::CATASTROPHE_STAGNATION_GENS);
-  
-  // VND-based trigger: if VND success rate is critically low (<3%) after many calls
-  double vnd_success_rate = (diag_vnd_calls_ > 0) ? (100.0 * diag_vnd_improvements_ / diag_vnd_calls_) : 100.0;
-  bool vnd_exhausted = (vnd_success_rate < Config::VND_EXHAUSTED_THRESHOLD && diag_vnd_calls_ > Config::VND_EXHAUSTED_MIN_CALLS);
 
-  if ((stagnation_trigger || vnd_exhausted) && time_since_cat > Config::CATASTROPHE_MIN_GAP_GENS) {
-    const char* reason = vnd_exhausted ? "VND_EXHAUSTED" : "STAGNATION";
-    std::cout << "\033[96m [CATASTROPHE I" << id_ << "] Trigger: " << reason 
-              << " (stag=" << time_since << "g, VND=" << std::fixed << std::setprecision(1) 
-              << vnd_success_rate << "%, CV=" << std::setprecision(2) 
+  // VND-based trigger: if VND success rate is critically low (<3%) after many
+  // calls
+  double vnd_success_rate =
+      (diag_vnd_calls_ > 0) ? (100.0 * diag_vnd_improvements_ / diag_vnd_calls_)
+                            : 100.0;
+  bool vnd_exhausted = (vnd_success_rate < Config::VND_EXHAUSTED_THRESHOLD &&
+                        diag_vnd_calls_ > Config::VND_EXHAUSTED_MIN_CALLS);
+
+  if ((stagnation_trigger || vnd_exhausted) &&
+      time_since_cat > Config::CATASTROPHE_MIN_GAP_GENS) {
+    const char *reason = vnd_exhausted ? "VND_EXHAUSTED" : "STAGNATION";
+    std::cout << "\033[96m [CATASTROPHE I" << id_ << "] Trigger: " << reason
+              << " (stag=" << time_since << "g, VND=" << std::fixed
+              << std::setprecision(1) << vnd_success_rate
+              << "%, CV=" << std::setprecision(2)
               << current_structural_diversity_ << ")\033[0m\n";
     Catastrophy();
     last_catastrophy_gen_ = current_generation_;
   }
 
+  // Update is_stuck_ flag for asynchronous migration
+  is_stuck_.store(time_since > STUCK_THRESHOLD || vnd_exhausted,
+                  std::memory_order_relaxed);
+
   if (IsExploitation()) {
     {
       std::lock_guard<std::mutex> lock(best_mutex_);
-      route_pool_.AddRoutesFromSolution(current_best_.GetGenotype(), *evaluator_);
+      route_pool_.AddRoutesFromSolution(current_best_.GetGenotype(),
+                                        *evaluator_);
     }
 
     size_t current_updates = route_pool_.GetTotalRoutesAdded();
     bool pool_updated = (current_updates > last_routes_added_snapshot_);
-    
+
     // Trigger Frankenstein ONLY when RoutePool has actually learned
     // === ENDGAME MODE CHECK ===
     auto now_gen = std::chrono::steady_clock::now();
-    double elapsed_gen = std::chrono::duration<double>(now_gen - start_time_).count();
-    bool is_endgame = (elapsed_gen > Config::MAX_TIME_SECONDS * Config::ENDGAME_THRESHOLD);
+    double elapsed_gen =
+        std::chrono::duration<double>(now_gen - start_time_).count();
+    bool is_endgame =
+        (elapsed_gen > Config::MAX_TIME_SECONDS * Config::ENDGAME_THRESHOLD);
 
     // Dynamic Parameters
     int vnd_iters = GetVndIterations();
     if (is_endgame) {
-        // Boost VND in endgame for everyone
-        vnd_iters = Config::EXPLOITATION_VND_MAX; 
+      // Boost VND in endgame for everyone
+      vnd_iters = Config::EXPLOITATION_VND_MAX;
     }
 
     // FRANKENSTEIN
     bool use_frankenstein = Config::ENABLE_FRANKENSTEIN;
-    // RESTRICTION: Frankenstein only for Exploitation islands to maintain diversity
-    if (IsExploration()) use_frankenstein = false;
-    
+    // RESTRICTION: Frankenstein only for Exploitation islands to maintain
+    // diversity
+    if (IsExploration())
+      use_frankenstein = false;
+
     // HEURISTIC: Disable Frankenstein for huge instances (>2000 customers)
     // Beam Search is too expensive (O(N^2) or worse) here
-    if (evaluator_->GetSolutionSize() > Config::FRANKENSTEIN_MAX_INSTANCE_SIZE) use_frankenstein = false;
+    if (evaluator_->GetSolutionSize() > Config::FRANKENSTEIN_MAX_INSTANCE_SIZE)
+      use_frankenstein = false;
 
-    if (use_frankenstein && route_pool_.HasNewRoutesSince(last_routes_added_snapshot_)) {
+    if (use_frankenstein &&
+        route_pool_.HasNewRoutesSince(last_routes_added_snapshot_)) {
       last_routes_added_snapshot_ = current_updates;
-      Individual frankenstein = route_pool_.SolveBeamSearch(evaluator_, split_, Config::FRANKENSTEIN_BEAM_WIDTH);
+      Individual frankenstein = route_pool_.SolveBeamSearch(
+          evaluator_, split_, Config::FRANKENSTEIN_BEAM_WIDTH);
       if (frankenstein.IsEvaluated() && frankenstein.GetFitness() < 1e9) {
         int vnd_iters = Config::FRANKENSTEIN_VND_ITERS;
-        if (elapsed > Config::MAX_TIME_SECONDS * 0.8) vnd_iters = Config::FRANKENSTEIN_VND_ITERS_LATE;
+        if (elapsed > Config::MAX_TIME_SECONDS * 0.8)
+          vnd_iters = Config::FRANKENSTEIN_VND_ITERS_LATE;
 
         bool improved = false;
         for (int pass = 0; pass < Config::FRANKENSTEIN_VND_PASSES; ++pass) {
-             if (local_search_.RunVND(frankenstein, vnd_iters, true, true, true)) improved = true;
-             else break;
+          if (local_search_.RunVND(frankenstein, vnd_iters, true, true, true))
+            improved = true;
+          else
+            break;
         }
-        
+
         if (improved) {
-            frankenstein.Canonicalize();
-            frankenstein.SetFitness(SafeEvaluate(frankenstein));
-            // std::cout << " [BEAM] Frankenstein improved by VND! Final Fit: " << frankenstein.GetFitness() << std::endl;
+          frankenstein.Canonicalize();
+          frankenstein.SetFitness(SafeEvaluate(frankenstein));
+          // std::cout << " [BEAM] Frankenstein improved by VND! Final Fit: " <<
+          // frankenstein.GetFitness() << std::endl;
         }
 
         // [ANTI-CLONE] Check if this frankenstein is already in population
         if (!ContainsSolution(frankenstein)) {
-            std::lock_guard<std::mutex> lock(population_mutex_);
-            
-            // Force Injection Logic (User Request: "siłowo wstrzykiwany")
-            // 10% chance to force inject, displacing a random individual (but not the absolute best)
-            bool force_injected = false;
-            std::uniform_real_distribution<double> d_force(0.0, 1.0);
-            if (d_force(rng_) < Config::FRANKENSTEIN_FORCE_INJECT_PROB) { 
-                int victim_idx = rng_() % population_.size();
-                // Protect the absolute best from forced replacement to ensure monotonicity of best found
-                if (population_[victim_idx].GetFitness() > current_best_.GetFitness() + 1e-6) { 
-                    population_[victim_idx] = frankenstein;
-                    std::cout << "\033[35m [BEAM] [Island " << id_ << "] Frankenstein FORCIBLY injected (Fit: " << frankenstein.GetFitness() << ")\033[0m" << std::endl;
-                    force_injected = true;
-                }
-            }
+          std::lock_guard<std::mutex> lock(population_mutex_);
 
-            if (!force_injected) {
-                int worst = GetWorstBiasedIndex();
-                if (worst >= 0) {
-                    if (frankenstein.GetFitness() < population_[worst].GetFitness()) {
-                        population_[worst] = frankenstein;
-                        std::cout << "\033[35m [BEAM] [Island " << id_ << "] Frankenstein injected into population (Fit: " << frankenstein.GetFitness() << ")\033[0m" << std::endl;
-                    }
-                }
+          // Force Injection Logic (User Request: "siłowo wstrzykiwany")
+          // 10% chance to force inject, displacing a random individual (but not
+          // the absolute best)
+          bool force_injected = false;
+          std::uniform_real_distribution<double> d_force(0.0, 1.0);
+          if (d_force(rng_) < Config::FRANKENSTEIN_FORCE_INJECT_PROB) {
+            int victim_idx = rng_() % population_.size();
+            // Protect the absolute best from forced replacement to ensure
+            // monotonicity of best found
+            if (population_[victim_idx].GetFitness() >
+                current_best_.GetFitness() + 1e-6) {
+              population_[victim_idx] = frankenstein;
+              std::cout << "\033[35m [BEAM] [Island " << id_
+                        << "] Frankenstein FORCIBLY injected (Fit: "
+                        << frankenstein.GetFitness() << ")\033[0m" << std::endl;
+              force_injected = true;
             }
+          }
+
+          if (!force_injected) {
+            int worst = GetWorstBiasedIndex();
+            if (worst >= 0) {
+              if (frankenstein.GetFitness() < population_[worst].GetFitness()) {
+                population_[worst] = frankenstein;
+                std::cout << "\033[35m [BEAM] [Island " << id_
+                          << "] Frankenstein injected into population (Fit: "
+                          << frankenstein.GetFitness() << ")\033[0m"
+                          << std::endl;
+              }
+            }
+          }
         }
         {
           std::lock_guard<std::mutex> lock(best_mutex_);
@@ -959,56 +793,69 @@ void Island::RunGeneration() {
   }
 }
 
-bool Island::ContainsSolution(const Individual& ind) const {
+bool Island::ContainsSolution(const Individual &ind) const {
   uint64_t h = HashGenotype64(ind.GetGenotype());
   int num_groups = evaluator_->GetNumGroups();
-  const auto& perm = evaluator_->GetPermutation();
+  const auto &perm = evaluator_->GetPermutation();
   int genotype_size = static_cast<int>(ind.GetGenotype().size());
-  
-  // BPD threshold: if < 10% of pairs differ, treat as clone (STATIC - simpler)
-  int bpd_clone_threshold = std::max(10, genotype_size * 10 / 100);  // 10% different
 
-  for (const auto& p : population_) {
-      // fast hash check first
-      if (HashGenotype64(p.GetGenotype()) == h) return true;
-      
-      // BPD-based structural similarity (not fitness!)
-      // this prevents ping-pong: if migrant is structurally similar to anyone, reject
-      int bpd = const_cast<Island*>(this)->CalculateBrokenPairsDistance(
-          ind, p, perm, num_groups);
-      
-      if (bpd < bpd_clone_threshold) {
-        return true;  // too similar structurally - treat as clone
-      }
+  // BPD threshold: if < 10% of pairs differ, treat as clone (STATIC - simpler)
+  int bpd_clone_threshold =
+      std::max(10, genotype_size * 10 / 100); // 10% different
+
+  for (const auto &p : population_) {
+    // fast hash check first
+    if (HashGenotype64(p.GetGenotype()) == h)
+      return true;
+
+    // BPD-based structural similarity (not fitness!)
+    // this prevents ping-pong: if migrant is structurally similar to anyone,
+    // reject
+    int bpd = const_cast<Island *>(this)->CalculateBrokenPairsDistance(
+        ind, p, perm, num_groups);
+
+    if (bpd < bpd_clone_threshold) {
+      return true; // too similar structurally - treat as clone
+    }
   }
   return false;
 }
 
 void Island::RunDebugDiagnostics() {
-  std::cout << "\n--- [DIAGNOSTICS GEN " << current_generation_ << "] ---" << std::endl;
+  std::cout << "\n--- [DIAGNOSTICS GEN " << current_generation_ << "] ---"
+            << std::endl;
   // Simplified diagnostics to avoid clutter
-  // Checks basic consistency if needed, currently empty for performance/cleanliness
-  // as per refactoring request.
-  std::cout << "Best Fix: " << current_best_.GetFitness() 
+  // Checks basic consistency if needed, currently empty for
+  // performance/cleanliness as per refactoring request.
+  std::cout << "Best Fix: " << current_best_.GetFitness()
             << " | Div: " << current_structural_diversity_ << std::endl;
 }
 
 int Island::ApplyMicroSplitMutation(Individual &child) {
   double stagnation_factor = std::min(1.0, (double)stagnation_count_ / 2000.0);
-  
+
   // Per-island split level: I0=small(2), I2=medium(1), I4=large(0)
   int intensity;
   if (IsExploration()) {
     switch (id_) {
-      case 0: intensity = Config::EXPLORE_I0_SPLIT_LEVEL; break;
-      case 2: intensity = Config::EXPLORE_I2_SPLIT_LEVEL; break;
-      case 4: intensity = Config::EXPLORE_I4_SPLIT_LEVEL; break;
-      default: intensity = 1; break;
+    case 0:
+      intensity = Config::EXPLORE_I0_SPLIT_LEVEL;
+      break;
+    case 2:
+      intensity = Config::EXPLORE_I2_SPLIT_LEVEL;
+      break;
+    case 4:
+      intensity = Config::EXPLORE_I4_SPLIT_LEVEL;
+      break;
+    default:
+      intensity = 1;
+      break;
     }
   } else {
-    intensity = 0;  // exploitation uses smallest windows
+    intensity = 0; // exploitation uses smallest windows
   }
-  bool success = mutator_.ApplyMicroSplitMutation(child, stagnation_factor, intensity, rng_);
+  bool success = mutator_.ApplyMicroSplitMutation(child, stagnation_factor,
+                                                  intensity, rng_);
 
 #ifdef RESEARCH
   return success ? (int)OpType::MUT_SIMPLE : 0;
@@ -1021,15 +868,17 @@ int Island::ApplyMutation(Individual &child, bool is_endgame) {
   std::uniform_real_distribution<double> d(0.0, 1.0);
   int executed_op = -1;
   bool mutated = false;
-  bool strong_mutation = false; // To return if significant change happened, allowing VND
+  bool strong_mutation =
+      false; // To return if significant change happened, allowing VND
 
   // 1. Structural Mutations (MicroSplit)
   if (d(rng_) < p_microsplit_) {
-    ApplyMicroSplitMutation(child);
+   // ApplyMicroSplitMutation(child);
     strong_mutation = true;
     mutated = true;
 #ifdef RESEARCH
-    executed_op = (int)OpType::MUT_SIMPLE; // Mapping MicroSplit to Simple for stats or new enum
+    executed_op = (int)OpType::MUT_SIMPLE; // Mapping MicroSplit to Simple for
+                                           // stats or new enum
 #endif
   }
 
@@ -1037,18 +886,25 @@ int Island::ApplyMutation(Individual &child, bool is_endgame) {
   // Per-island R&R weight for exploration islands
   if (d(rng_) < p_mutation_) {
     double rnd = d(rng_);
-    double rr_threshold = Config::MUT_SPATIAL_THRESHOLD;  // default
-    
+    double rr_threshold = Config::MUT_SPATIAL_THRESHOLD; // default
+
     // Per-island R&R weighting
     if (IsExploration()) {
       switch (id_) {
-        case 0: rr_threshold = 1.0 - Config::EXPLORE_I0_RR_WEIGHT; break;  // I0: 60% R&R
-        case 2: rr_threshold = 1.0 - Config::EXPLORE_I2_RR_WEIGHT; break;  // I2: 40% R&R
-        case 4: rr_threshold = 1.0 - Config::EXPLORE_I4_RR_WEIGHT; break;  // I4: 25% R&R
-        default: break;
+      case 0:
+        rr_threshold = 1.0 - Config::EXPLORE_I0_RR_WEIGHT;
+        break; // I0: 60% R&R
+      case 2:
+        rr_threshold = 1.0 - Config::EXPLORE_I2_RR_WEIGHT;
+        break; // I2: 40% R&R
+      case 4:
+        rr_threshold = 1.0 - Config::EXPLORE_I4_RR_WEIGHT;
+        break; // I4: 25% R&R
+      default:
+        break;
       }
     }
-    
+
     if (rnd < Config::MUT_AGGRESSIVE_THRESHOLD) {
       mutator_.AggressiveMutate(child, rng_);
 #ifdef RESEARCH
@@ -1057,14 +913,15 @@ int Island::ApplyMutation(Individual &child, bool is_endgame) {
     } else if (rnd < rr_threshold) {
       mutator_.ApplySmartSpatialMove(child, rng_);
     } else {
-      mutator_.ApplyRuinRecreate(child, (1 - current_structural_diversity_), IsExploitation(), rng_);
+      mutator_.ApplyRuinRecreate(child, (1 - current_structural_diversity_),
+                                 IsExploitation(), rng_);
 #ifdef RESEARCH
       executed_op = (int)OpType::MUT_SPATIAL;
 #endif
     }
     mutated = true;
   }
-  
+
   // 2.5 MergeRegret mutation (re-enabled as requested)
   if (IsExploitation() && d(rng_) < 0.15) {
     if (ApplyMergeRegret(child)) {
@@ -1113,13 +970,16 @@ int Island::ApplyMutation(Individual &child, bool is_endgame) {
     }
   }
 
-  // Return logic: currently returns int op type, but caller in RunGeneration needs to know if mutation happened
-  // We can return executed_op for stats, and checking > -1 or similar. 
-  // However, multiple ops can run. Let's return the most significant one or just generic.
-  // The original RunGeneration used flags. 
-  // We will return 1 if meaningful mutation happened (strong), 2 if weak, 0 if none.
-  if (strong_mutation) return 2;
-  if (mutated) return 1;
+  // Return logic: currently returns int op type, but caller in RunGeneration
+  // needs to know if mutation happened We can return executed_op for stats, and
+  // checking > -1 or similar. However, multiple ops can run. Let's return the
+  // most significant one or just generic. The original RunGeneration used
+  // flags. We will return 1 if meaningful mutation happened (strong), 2 if
+  // weak, 0 if none.
+  if (strong_mutation)
+    return 2;
+  if (mutated)
+    return 1;
   return 0;
 }
 
@@ -1174,52 +1034,51 @@ void Island::Catastrophy() {
     UpdateBiasedFitness();
   }
   CalculatePopulationCV();
-  
-  // GLS: reduce edge penalties (keep 25% to maintain some memory of topology)
-  for (int& p : edge_penalty_) {
-    p = static_cast<int>(p * Config::GLS_CATASTROPHE_RESET);
-  }
-  
+
   // IMMUNITY: 15 seconds of no migration after catastrophe
-  immune_until_time_ = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  immune_until_time_ =
+      std::chrono::steady_clock::now() + std::chrono::seconds(15);
 }
 
 void Island::UpdateBiasedFitness() {
   int pop_size = static_cast<int>(population_.size());
-  if (pop_size == 0) return;
+  if (pop_size == 0)
+    return;
 
-  std::vector<int> indices(pop_size);
-  std::iota(indices.begin(), indices.end(), 0);
-  std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-    return population_[a].GetFitness() < population_[b].GetFitness();
-  });
+  // Get current best for BPD comparison (only vs best, not entire elite)
+  Individual best;
+  {
+    std::lock_guard<std::mutex> lock(best_mutex_);
+    best = current_best_;
+  }
 
   const std::vector<int> &perm = evaluator_->GetPermutation();
   int num_groups = evaluator_->GetNumGroups();
 
-  int ref_size = std::min(pop_size, std::max(2, Config::ELITERATIO));
   double total_population_bpd = 0.0;
   int measurements_count = 0;
 
+  // Calculate BPD only against the best individual (O(N) instead of O(N*E))
+  // For large instances, sample instead of checking all
+  int num_clients = evaluator_->GetSolutionSize();
+  int sample_step = 1;
+  if (num_clients > Config::HUGE_INSTANCE_THRESHOLD) {
+    sample_step = std::max(1, pop_size / 10); // sample ~10 individuals
+  } else if (num_clients > Config::LARGE_INSTANCE_THRESHOLD) {
+    sample_step = std::max(1, pop_size / 20); // sample ~20 individuals
+  }
+  
   for (int i = 0; i < pop_size; ++i) {
-    double dist_sum = 0.0;
-    int idx_i = indices[i];
-    int comparisons = 0;
-
-    for (int k = 0; k < ref_size; ++k) {
-      int idx_best = indices[k];
-      if (idx_i == idx_best) continue;
-
-      int bpd = CalculateBrokenPairsDistance(
-          population_[idx_i], population_[idx_best], perm, num_groups);
-      dist_sum += bpd;
-      comparisons++;
+    if (i % sample_step == 0) {
+      int bpd = CalculateBrokenPairsDistance(population_[i], best, perm, num_groups);
+      population_[i].SetDiversityScore(static_cast<double>(bpd));
+      total_population_bpd += bpd;
+      measurements_count++;
+    } else {
+      // Interpolate from previous sampled value
+      int prev_sampled = (i / sample_step) * sample_step;
+      population_[i].SetDiversityScore(population_[prev_sampled].GetDiversityScore());
     }
-
-    double avg_dist = (comparisons > 0) ? (dist_sum / comparisons) : 0.0;
-    population_[idx_i].SetDiversityScore(avg_dist);
-    total_population_bpd += avg_dist;
-    measurements_count++;
   }
 
   if (measurements_count > 0) {
@@ -1227,8 +1086,10 @@ void Island::UpdateBiasedFitness() {
     double raw_diversity = avg_raw_bpd / (double)evaluator_->GetSolutionSize();
     double range = max_diversity_baseline_ - min_diversity_baseline_;
     if (range > 0.001) {
-      current_structural_diversity_ = (raw_diversity - min_diversity_baseline_) / range;
-      current_structural_diversity_ = std::max(0.0, std::min(1.0, current_structural_diversity_));
+      current_structural_diversity_ =
+          (raw_diversity - min_diversity_baseline_) / range;
+      current_structural_diversity_ =
+          std::max(0.0, std::min(1.0, current_structural_diversity_));
     } else {
       current_structural_diversity_ = 0.5;
     }
@@ -1236,12 +1097,17 @@ void Island::UpdateBiasedFitness() {
     current_structural_diversity_ = 0.0;
   }
 
+  // Sort by diversity for ranking
+  std::vector<int> indices(pop_size);
+  std::iota(indices.begin(), indices.end(), 0);
   std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-    return population_[a].GetDiversityScore() > population_[b].GetDiversityScore();
+    return population_[a].GetDiversityScore() >
+           population_[b].GetDiversityScore();
   });
 
   std::vector<int> rank_diversity(pop_size);
-  for (int r = 0; r < pop_size; ++r) rank_diversity[indices[r]] = r;
+  for (int r = 0; r < pop_size; ++r)
+    rank_diversity[indices[r]] = r;
 
   std::vector<int> rank_fitness(pop_size);
   std::vector<int> fit_indices(pop_size);
@@ -1249,11 +1115,15 @@ void Island::UpdateBiasedFitness() {
   std::sort(fit_indices.begin(), fit_indices.end(), [&](int a, int b) {
     return population_[a].GetFitness() < population_[b].GetFitness();
   });
-  for (int r = 0; r < pop_size; ++r) rank_fitness[fit_indices[r]] = r;
+  for (int r = 0; r < pop_size; ++r)
+    rank_fitness[fit_indices[r]] = r;
 
-  double elite_ratio = (double)ref_size / (double)pop_size;
+  // Biased fitness with fixed elite ratio (using 1/pop_size since comparing to
+  // single best)
+  double elite_ratio = 1.0 / (double)pop_size;
   for (int i = 0; i < pop_size; ++i) {
-    double biased = (double)rank_fitness[i] + (1.0 - elite_ratio) * (double)rank_diversity[i];
+    double biased = (double)rank_fitness[i] +
+                    (1.0 - elite_ratio) * (double)rank_diversity[i];
     population_[i].SetBiasedFitness(biased);
   }
 }
@@ -1265,14 +1135,16 @@ int Island::CalculateBrokenPairsDistance(const Individual &ind1,
   const std::vector<int> &g1 = ind1.GetGenotype();
   const std::vector<int> &g2 = ind2.GetGenotype();
   int size = static_cast<int>(g1.size());
-  if (size == 0) return 0;
+  if (size == 0)
+    return 0;
 
   std::fill(last_in_group1.begin(), last_in_group1.end(), -1);
   std::fill(last_in_group2.begin(), last_in_group2.end(), -1);
 
   for (int customer_id : permutation) {
     int idx = customer_id - 2;
-    if (idx < 0 || idx >= size) continue;
+    if (idx < 0 || idx >= size)
+      continue;
 
     int group1 = g1[idx];
     if (group1 >= 0 && group1 < num_groups) {
@@ -1293,7 +1165,8 @@ int Island::CalculateBrokenPairsDistance(const Individual &ind1,
 
   int distance = 0;
   for (int i = 0; i < size; ++i) {
-    if (pred1[i] != pred2[i]) distance++;
+    if (pred1[i] != pred2[i])
+      distance++;
   }
   return distance;
 }
@@ -1309,7 +1182,8 @@ void Island::CalculatePopulationCV() {
 
   for (const auto &ind : population_) {
     double x = ind.GetFitness();
-    if (x > 1e14) continue;
+    if (x > 1e14)
+      continue;
     n++;
     double delta = x - mean;
     mean += delta / n;
@@ -1379,16 +1253,19 @@ bool Island::ApplyLoadBalancingChainMutation(Individual &individual) {
 
   std::vector<int> overloaded_groups;
   for (int g = 0; g < num_groups; ++g) {
-    if (loads[g] > capacity) overloaded_groups.push_back(g);
+    if (loads[g] > capacity)
+      overloaded_groups.push_back(g);
   }
-  if (overloaded_groups.empty()) return false;
+  if (overloaded_groups.empty())
+    return false;
 
   std::shuffle(overloaded_groups.begin(), overloaded_groups.end(), rng_);
   bool any_change = false;
   const int MAX_DEPTH = 10;
 
   for (int start_group : overloaded_groups) {
-    if (loads[start_group] <= capacity) continue;
+    if (loads[start_group] <= capacity)
+      continue;
 
     std::vector<ChainMove> chain_history;
     std::vector<bool> group_visited(num_groups, false);
@@ -1397,11 +1274,13 @@ bool Island::ApplyLoadBalancingChainMutation(Individual &individual) {
     bool chain_success = false;
 
     for (int depth = 0; depth < MAX_DEPTH; ++depth) {
-      auto move = FindNextChainMove(current_group, group_visited, loads, group_clients);
+      auto move =
+          FindNextChainMove(current_group, group_visited, loads, group_clients);
       int best_client = move.first;
       int best_target = move.second;
 
-      if (best_target == -1) break;
+      if (best_target == -1)
+        break;
 
       int demand = demands[best_client - 1];
       int sol_idx = best_client - 2;
@@ -1411,20 +1290,23 @@ bool Island::ApplyLoadBalancingChainMutation(Individual &individual) {
         loads[current_group] -= demand;
         loads[best_target] += demand;
 
-        auto it = std::find(group_clients[current_group].begin(), group_clients[current_group].end(), best_client);
+        auto it = std::find(group_clients[current_group].begin(),
+                            group_clients[current_group].end(), best_client);
         if (it != group_clients[current_group].end()) {
           *it = group_clients[current_group].back();
           group_clients[current_group].pop_back();
           group_clients[best_target].push_back(best_client);
         }
 
-        chain_history.push_back({best_client, current_group, best_target, demand});
+        chain_history.push_back(
+            {best_client, current_group, best_target, demand});
         group_visited[best_target] = true;
       }
 
       bool all_ok = true;
       for (const auto &m : chain_history) {
-        if (loads[m.from_group] > capacity) all_ok = false;
+        if (loads[m.from_group] > capacity)
+          all_ok = false;
       }
       if (all_ok && loads[current_group] <= capacity) {
         chain_success = true;
@@ -1451,39 +1333,43 @@ bool Island::ApplyLoadBalancingChainMutation(Individual &individual) {
   return any_change;
 }
 
-std::pair<int, int> Island::FindNextChainMove(int group_idx, 
-                                        const std::vector<bool> &visited,
-                                        const std::vector<int>& loads,
-                                        const std::vector<std::vector<int>>& group_clients) {
-    if (group_clients[group_idx].empty()) return {-1, -1};
-    int num_groups = static_cast<int>(loads.size());
-    int capacity = evaluator_->GetCapacity();
-    const std::vector<int> &demands = evaluator_->GetDemands();
-
-    // Strategy 1: Find valid move to non-visited group
-    std::vector<int> candidates = group_clients[group_idx];
-    std::shuffle(candidates.begin(), candidates.end(), rng_);
-    int trials = std::min((int)candidates.size(), 10);
-
-    for (int i = 0; i < trials; ++i) {
-        int client_id = candidates[i];
-        int demand = demands[client_id - 1];
-        for (int g = 0; g < num_groups; ++g) {
-            if (g == group_idx || visited[g]) continue;
-            if (loads[g] + demand <= capacity) return {client_id, g};
-        }
-    }
-
-    // Strategy 2: Force move to explore
-    for (int i = 0; i < trials; ++i) {
-        int client_id = candidates[i];
-        int target_candidate = rng_() % num_groups;
-        for (int k = 0; k < 5; k++) {
-            int g = (target_candidate + k) % num_groups;
-            if (g != group_idx && !visited[g]) return {client_id, g};
-        }
-    }
+std::pair<int, int>
+Island::FindNextChainMove(int group_idx, const std::vector<bool> &visited,
+                          const std::vector<int> &loads,
+                          const std::vector<std::vector<int>> &group_clients) {
+  if (group_clients[group_idx].empty())
     return {-1, -1};
+  int num_groups = static_cast<int>(loads.size());
+  int capacity = evaluator_->GetCapacity();
+  const std::vector<int> &demands = evaluator_->GetDemands();
+
+  // Strategy 1: Find valid move to non-visited group
+  std::vector<int> candidates = group_clients[group_idx];
+  std::shuffle(candidates.begin(), candidates.end(), rng_);
+  int trials = std::min((int)candidates.size(), 10);
+
+  for (int i = 0; i < trials; ++i) {
+    int client_id = candidates[i];
+    int demand = demands[client_id - 1];
+    for (int g = 0; g < num_groups; ++g) {
+      if (g == group_idx || visited[g])
+        continue;
+      if (loads[g] + demand <= capacity)
+        return {client_id, g};
+    }
+  }
+
+  // Strategy 2: Force move to explore
+  for (int i = 0; i < trials; ++i) {
+    int client_id = candidates[i];
+    int target_candidate = rng_() % num_groups;
+    for (int k = 0; k < 5; k++) {
+      int g = (target_candidate + k) % num_groups;
+      if (g != group_idx && !visited[g])
+        return {client_id, g};
+    }
+  }
+  return {-1, -1};
 }
 
 bool Island::ApplyLoadBalancingSwapMutation(Individual &individual) {
@@ -1492,7 +1378,7 @@ bool Island::ApplyLoadBalancingSwapMutation(Individual &individual) {
   int capacity = evaluator_->GetCapacity();
   const std::vector<int> &demands = evaluator_->GetDemands();
   const std::vector<int> &perm = evaluator_->GetPermutation();
-  
+
   std::vector<int> loads(num_groups, 0);
   std::vector<std::vector<int>> group_clients(num_groups);
   for (int customer_id : perm) {
@@ -1508,48 +1394,57 @@ bool Island::ApplyLoadBalancingSwapMutation(Individual &individual) {
 
   std::vector<int> overloaded_groups;
   for (int g = 0; g < num_groups; ++g) {
-    if (loads[g] > capacity) overloaded_groups.push_back(g);
+    if (loads[g] > capacity)
+      overloaded_groups.push_back(g);
   }
-  if (overloaded_groups.empty()) return false;
+  if (overloaded_groups.empty())
+    return false;
   std::shuffle(overloaded_groups.begin(), overloaded_groups.end(), rng_);
-  
+
   bool changed = false;
   for (int source_group : overloaded_groups) {
-    if (loads[source_group] <= capacity) continue;
+    if (loads[source_group] <= capacity)
+      continue;
     std::vector<int> target_groups(num_groups);
     std::iota(target_groups.begin(), target_groups.end(), 0);
     std::shuffle(target_groups.begin(), target_groups.end(), rng_);
-    
+
     bool fixed = false;
     for (int target_group : target_groups) {
-      if (target_group == source_group) continue;
-      if (fixed) break;
-      
-      std::shuffle(group_clients[source_group].begin(), group_clients[source_group].end(), rng_);
-      std::shuffle(group_clients[target_group].begin(), group_clients[target_group].end(), rng_);
-      
+      if (target_group == source_group)
+        continue;
+      if (fixed)
+        break;
+
+      std::shuffle(group_clients[source_group].begin(),
+                   group_clients[source_group].end(), rng_);
+      std::shuffle(group_clients[target_group].begin(),
+                   group_clients[target_group].end(), rng_);
+
       for (int client_a : group_clients[source_group]) {
-          int demand_a = demands[client_a - 1];
-          for (int client_b : group_clients[target_group]) {
-              int demand_b = demands[client_b - 1];
-              if (demand_a <= demand_b) continue; // Only swap if reducing load
-              
-              if (loads[target_group] - demand_b + demand_a <= capacity) {
-                   int idx_a = client_a - 2;
-                   int idx_b = client_b - 2;
-                   if (idx_a >= 0 && idx_b >= 0) {
-                       solution[idx_a] = target_group;
-                       solution[idx_b] = source_group;
-                       loads[source_group] = loads[source_group] - demand_a + demand_b;
-                       loads[target_group] = loads[target_group] - demand_b + demand_a;
-                       changed = true;
-                       if (loads[source_group] <= capacity) fixed = true;
-                       goto next_target;
-                   }
-              }
+        int demand_a = demands[client_a - 1];
+        for (int client_b : group_clients[target_group]) {
+          int demand_b = demands[client_b - 1];
+          if (demand_a <= demand_b)
+            continue; // Only swap if reducing load
+
+          if (loads[target_group] - demand_b + demand_a <= capacity) {
+            int idx_a = client_a - 2;
+            int idx_b = client_b - 2;
+            if (idx_a >= 0 && idx_b >= 0) {
+              solution[idx_a] = target_group;
+              solution[idx_b] = source_group;
+              loads[source_group] = loads[source_group] - demand_a + demand_b;
+              loads[target_group] = loads[target_group] - demand_b + demand_a;
+              changed = true;
+              if (loads[source_group] <= capacity)
+                fixed = true;
+              goto next_target;
+            }
           }
+        }
       }
-      next_target:;
+    next_target:;
     }
   }
   return changed;
@@ -1560,104 +1455,117 @@ bool Island::ApplyLoadBalancingSimple(Individual &individual) {
   int num_groups = evaluator_->GetNumGroups();
   int capacity = evaluator_->GetCapacity();
   const std::vector<int> &demands = evaluator_->GetDemands();
-  
+
   std::vector<int> loads(num_groups, 0);
   for (size_t i = 0; i < solution.size(); ++i) {
-      int g = solution[i];
-      int cust_id = i + 2; // Approximate ID mapping if aligned
-      // Correct mapping via Permutation is better but costly here, assumes simplistic index
-      // But let's use proper mapping if possible.
-      // Actually the caller logic used exact permutation loop.
-      // For simplicity, let's use the permutation-based loop for load calculation
-      // BUT `solution` is indexed by (customer_id - 2).
+    int g = solution[i];
+    int cust_id = i + 2; // Approximate ID mapping if aligned
+    // Correct mapping via Permutation is better but costly here, assumes
+    // simplistic index But let's use proper mapping if possible. Actually the
+    // caller logic used exact permutation loop. For simplicity, let's use the
+    // permutation-based loop for load calculation BUT `solution` is indexed by
+    // (customer_id - 2).
   }
   // Re-calculating loads properly:
   const std::vector<int> &perm = evaluator_->GetPermutation();
   for (int customer_id : perm) {
-      int sol_idx = customer_id - 2;
-      if (sol_idx >= 0 && sol_idx < (int)solution.size()) {
-          int g = solution[sol_idx];
-          if (g >= 0 && g < num_groups) loads[g] += demands[customer_id - 1];
-      }
+    int sol_idx = customer_id - 2;
+    if (sol_idx >= 0 && sol_idx < (int)solution.size()) {
+      int g = solution[sol_idx];
+      if (g >= 0 && g < num_groups)
+        loads[g] += demands[customer_id - 1];
+    }
   }
 
   std::vector<int> overloaded;
   std::vector<int> underloaded;
   for (int g = 0; g < num_groups; ++g) {
-      if (loads[g] > capacity) overloaded.push_back(g);
-      else underloaded.push_back(g);
+    if (loads[g] > capacity)
+      overloaded.push_back(g);
+    else
+      underloaded.push_back(g);
   }
-  if (overloaded.empty() || underloaded.empty()) return false;
-  
+  if (overloaded.empty() || underloaded.empty())
+    return false;
+
   std::shuffle(overloaded.begin(), overloaded.end(), rng_);
   bool changed = false;
-  
+
   for (int source : overloaded) {
-     if (loads[source] <= capacity) continue;
-     // Find clients in this group
-     std::vector<int> clients;
-     for (int cust_id : perm) {
-         int idx = cust_id - 2;
-         if (idx >= 0 && solution[idx] == source) clients.push_back(cust_id);
-     }
-     std::shuffle(clients.begin(), clients.end(), rng_);
-     
-     for (int cust : clients) {
-         int demand = demands[cust - 1];
-         // Search for target
-         std::shuffle(underloaded.begin(), underloaded.end(), rng_);
-         for (int target : underloaded) {
-             if (loads[target] + demand <= capacity) {
-                 int idx = cust - 2;
-                 solution[idx] = target;
-                 loads[source] -= demand;
-                 loads[target] += demand;
-                 changed = true;
-                 break;
-             }
-         }
-         if (loads[source] <= capacity) break;
-     }
+    if (loads[source] <= capacity)
+      continue;
+    // Find clients in this group
+    std::vector<int> clients;
+    for (int cust_id : perm) {
+      int idx = cust_id - 2;
+      if (idx >= 0 && solution[idx] == source)
+        clients.push_back(cust_id);
+    }
+    std::shuffle(clients.begin(), clients.end(), rng_);
+
+    for (int cust : clients) {
+      int demand = demands[cust - 1];
+      // Search for target
+      std::shuffle(underloaded.begin(), underloaded.end(), rng_);
+      for (int target : underloaded) {
+        if (loads[target] + demand <= capacity) {
+          int idx = cust - 2;
+          solution[idx] = target;
+          loads[source] -= demand;
+          loads[target] += demand;
+          changed = true;
+          break;
+        }
+      }
+      if (loads[source] <= capacity)
+        break;
+    }
   }
   return changed;
 }
 
-Individual Island::CrossoverSpatial(const Individual &p1, const Individual &p2) {
+Individual Island::CrossoverNeighborBased(const Individual &p1,
+                                          const Individual &p2) {
   const std::vector<int> &g1 = p1.GetGenotype();
   const std::vector<int> &g2 = p2.GetGenotype();
   int size = static_cast<int>(g1.size());
   Individual child(size);
   std::vector<int> &child_genes = child.AccessGenotype();
 
-  if (size == 0 || !geometry_.HasCoordinates()) return child;
+  if (size == 0 || !geometry_.HasNeighbors()) {
+    // Fallback to uniform crossover
+    for (int i = 0; i < size; ++i) {
+      child_genes[i] = (rng_() % 2 == 0) ? g1[i] : g2[i];
+    }
+    return child;
+  }
 
+  // Pick a random center client
   std::uniform_int_distribution<int> dist_idx(0, size - 1);
   int center_idx = dist_idx(rng_);
-  const auto &center_coord = geometry_.GetCoordinate(center_idx + 1);
 
-  int radius_idx = dist_idx(rng_);
-  const auto &radius_coord = geometry_.GetCoordinate(radius_idx + 1);
+  // Get center's neighbors - these come from p1
+  const auto &neighbors = geometry_.GetNeighbors(center_idx);
+  std::unordered_set<int> neighbor_set(neighbors.begin(), neighbors.end());
+  neighbor_set.insert(center_idx); // include center itself
 
-  double r_sq = std::pow(center_coord.x - radius_coord.x, 2) + 
-                std::pow(center_coord.y - radius_coord.y, 2);
-
+  // Clients in neighbor set take genes from p1, others from p2
   for (int i = 0; i < size; ++i) {
-    const auto &px = geometry_.GetCoordinate(i + 1);
-    double dist_sq = std::pow(center_coord.x - px.x, 2) + 
-                     std::pow(center_coord.y - px.y, 2);
-    child_genes[i] = (dist_sq <= r_sq) ? g1[i] : g2[i];
+    child_genes[i] = (neighbor_set.count(i) > 0) ? g1[i] : g2[i];
   }
   return child;
 }
 
-Individual Island::CrossoverSequence(const Individual &p1, const Individual &p2) {
+Individual Island::CrossoverSequence(const Individual &p1,
+                                     const Individual &p2) {
   const std::vector<int> &perm = evaluator_->GetPermutation();
   int perm_size = static_cast<int>(perm.size());
   Individual child = p1;
   std::vector<int> &child_genes = child.AccessGenotype();
   const std::vector<int> &p2_genes = p2.GetGenotype();
 
-  if (child_genes.empty()) return child;
+  if (child_genes.empty())
+    return child;
   int cut_point = rng_() % perm_size;
 
   for (int i = cut_point; i < perm_size; ++i) {
@@ -1670,7 +1578,8 @@ Individual Island::CrossoverSequence(const Individual &p1, const Individual &p2)
   return child;
 }
 
-Individual Island::CrossoverUniform(const Individual &p1, const Individual &p2) {
+Individual Island::CrossoverUniform(const Individual &p1,
+                                    const Individual &p2) {
   const std::vector<int> &g1 = p1.GetGenotype();
   const std::vector<int> &g2 = p2.GetGenotype();
   int size = static_cast<int>(g1.size());
@@ -1691,21 +1600,28 @@ Individual Island::Crossover(const Individual &p1, const Individual &p2) {
   double r = dist(rng_);
   double sequence_prob;
 
-  if (id_ <= 1) sequence_prob = 0.31;
-  else if (id_ <= 3) sequence_prob = 0.4;
-  else sequence_prob = 0.6;
+  if (id_ <= 1)
+    sequence_prob = 0.31;
+  else if (id_ <= 3)
+    sequence_prob = 0.4;
+  else
+    sequence_prob = 0.6;
 
-  if (r < sequence_prob) return ApplySREX(p1, p2);
-  else return CrossoverSpatial(p1, p2);
+  if (r < sequence_prob)
+    return ApplySREX(p1, p2);
+  else
+    return CrossoverNeighborBased(p1, p2);
 }
 
-void Island::PrintIndividual(const Individual &individual, int global_generation) const {
+void Island::PrintIndividual(const Individual &individual,
+                             int global_generation) const {
   int num_groups = evaluator_->GetNumGroups();
   vector<int> group_counts(num_groups, 0);
   const vector<int> &genes = individual.GetGenotype();
   for (int g : genes)
-    if (g >= 0 && g < num_groups) group_counts[g]++;
-    
+    if (g >= 0 && g < num_groups)
+      group_counts[g]++;
+
   int extra_returns = evaluator_->GetTotalDepotReturns(genes);
   cout << "   [Island " << id_ << "] Gen: " << setw(6) << global_generation
        << " | Dist: " << fixed << setprecision(2) << individual.GetFitness()
@@ -1723,15 +1639,19 @@ void Island::ApplySplitToIndividual(Individual &indiv) {
 
   if (result.feasible) {
     std::vector<int> &genes = indiv.AccessGenotype();
-    if (result.group_assignment.size() != genes.size()) return;
+    if (result.group_assignment.size() != genes.size())
+      return;
 
     int routes_count = static_cast<int>(result.optimized_routes.size());
     for (size_t i = 0; i < genes.size(); ++i) {
       int assigned_route_id = result.group_assignment[i];
-      genes[i] = (assigned_route_id < fleet_limit) ? assigned_route_id : (assigned_route_id % fleet_limit);
+      genes[i] = (assigned_route_id < fleet_limit)
+                     ? assigned_route_id
+                     : (assigned_route_id % fleet_limit);
     }
-    
-    int excess_vehicles = (routes_count > fleet_limit) ? (routes_count - fleet_limit) : 0;
+
+    int excess_vehicles =
+        (routes_count > fleet_limit) ? (routes_count - fleet_limit) : 0;
     indiv.SetFitness(result.total_cost);
     indiv.SetReturnCount(excess_vehicles);
   } else {
@@ -1739,12 +1659,13 @@ void Island::ApplySplitToIndividual(Individual &indiv) {
   }
 }
 
-// UpdateAdaptiveParameters: Tuned based on Island Type and Calibrated Structural Diversity
+// UpdateAdaptiveParameters: Tuned based on Island Type and Calibrated
+// Structural Diversity
 void Island::UpdateAdaptiveParameters() {
   double relative_div = 0.0;
   // Use calibrate baselines to normalize diversity
   if (max_diversity_baseline_ > 1e-9) {
-    relative_div = (current_structural_diversity_ - min_diversity_baseline_) / 
+    relative_div = (current_structural_diversity_ - min_diversity_baseline_) /
                    (max_diversity_baseline_ - min_diversity_baseline_);
   }
   relative_div = std::max(0.0, std::min(1.0, relative_div));
@@ -1752,24 +1673,38 @@ void Island::UpdateAdaptiveParameters() {
   // Defines how "chaotic" the population is relative to our baselines.
   // 0.0 = fully converged state, 1.0 = fully random state
   double chaos = current_structural_diversity_;
-  
+
   // Base mutation probability based on exploration/exploitation role
-  double base_mut_prob = IsExploration() ? Config::EXPLORATION_MUTATION_PROB 
+  double base_mut_prob = IsExploration() ? Config::EXPLORATION_MUTATION_PROB
                                          : Config::EXPLOITATION_MUTATION_PROB;
-  
+
   // Dynamic mutation probability adjustment
   // If chaos is low (converged), increase mutation to escape
   // If chaos is high, decrease mutation to exploit
-  double dynamic_mut_prob = base_mut_prob + (Config::ADAPTIVE_CHAOS_BOOST * (1.0 - chaos)) - (Config::ADAPTIVE_CHAOS_PENALTY * chaos);
-  
+  double dynamic_mut_prob = base_mut_prob +
+                            (Config::ADAPTIVE_CHAOS_BOOST * (1.0 - chaos)) -
+                            (Config::ADAPTIVE_CHAOS_PENALTY * chaos);
+
   // Per-exploration-island mutation ranges for differentiation
   double mut_min, mut_max;
   if (IsExploration()) {
     switch (id_) {
-      case 0: mut_min = Config::EXPLORE_I0_MUT_MIN; mut_max = Config::EXPLORE_I0_MUT_MAX; break;  // 20-60%
-      case 2: mut_min = Config::EXPLORE_I2_MUT_MIN; mut_max = Config::EXPLORE_I2_MUT_MAX; break;  // 30-65%
-      case 4: mut_min = Config::EXPLORE_I4_MUT_MIN; mut_max = Config::EXPLORE_I4_MUT_MAX; break;  // 40-70%
-      default: mut_min = Config::ADAPTIVE_MUT_MIN; mut_max = Config::ADAPTIVE_MUT_MAX; break;
+    case 0:
+      mut_min = Config::EXPLORE_I0_MUT_MIN;
+      mut_max = Config::EXPLORE_I0_MUT_MAX;
+      break; // 20-60%
+    case 2:
+      mut_min = Config::EXPLORE_I2_MUT_MIN;
+      mut_max = Config::EXPLORE_I2_MUT_MAX;
+      break; // 30-65%
+    case 4:
+      mut_min = Config::EXPLORE_I4_MUT_MIN;
+      mut_max = Config::EXPLORE_I4_MUT_MAX;
+      break; // 40-70%
+    default:
+      mut_min = Config::ADAPTIVE_MUT_MIN;
+      mut_max = Config::ADAPTIVE_MUT_MAX;
+      break;
     }
   } else {
     mut_min = Config::ADAPTIVE_MUT_MIN;
@@ -1783,74 +1718,79 @@ void Island::UpdateAdaptiveParameters() {
   p_loadbalance_ = dynamic_mut_prob * 0.5;
   p_retminimizer_ = dynamic_mut_prob * 0.6;
   p_mergesplit_ = dynamic_mut_prob * 0.5;
-  
+
   if (IsExploitation()) {
-      p_swap3_ = Config::EXPLOITATION_P_SWAP3;
-      p_swap4_ = Config::EXPLOITATION_P_SWAP4;
-      p_microsplit_ = std::max(Config::EXPLOITATION_MIN_MICROSPLIT, p_microsplit_);  // min 20%
-      
-      // Fine-tuning for exploitation
-      if (chaos < 0.1) { // Very converged
-          p_loadbalance_ *= 1.2; // Increase repair attempts
-          p_retminimizer_ *= 1.2;
-      }
+    p_swap3_ = Config::EXPLOITATION_P_SWAP3;
+    p_swap4_ = Config::EXPLOITATION_P_SWAP4;
+    p_microsplit_ =
+        std::max(Config::EXPLOITATION_MIN_MICROSPLIT, p_microsplit_); // min 20%
+
+    // Fine-tuning for exploitation
+    if (chaos < 0.1) {       // Very converged
+      p_loadbalance_ *= 1.2; // Increase repair attempts
+      p_retminimizer_ *= 1.2;
+    }
   } else {
-      // Exploration
-      p_swap3_ = Config::EXPLORATION_P_SWAP3;
-      p_swap4_ = Config::EXPLORATION_P_SWAP4; // rarely use expensive swaps in exploration
+    // Exploration
+    p_swap3_ = Config::EXPLORATION_P_SWAP3;
+    p_swap4_ = Config::EXPLORATION_P_SWAP4; // rarely use expensive swaps in
+                                            // exploration
   }
 
-  // Legacy variables update (if still used elsewhere, though mostly replaced now)
+  // Legacy variables update (if still used elsewhere, though mostly replaced
+  // now)
   adaptive_mutation_rate_ = dynamic_mut_prob;
   adaptive_ruin_chance_ = dynamic_mut_prob; // Simplified mapping
-  
+
   if (IsExploration()) {
-      adaptive_vnd_prob_ = MapRange(relative_div, 0.0, 1.0, 0.10, 0.40); 
+    adaptive_vnd_prob_ = MapRange(relative_div, 0.0, 1.0, 0.10, 0.40);
   } else {
-      adaptive_vnd_prob_ = MapRange(relative_div, 0.0, 1.0, 0.50, 0.95);
+    adaptive_vnd_prob_ = MapRange(relative_div, 0.0, 1.0, 0.50, 0.95);
   }
 }
 
 // ApplySuccessionAdaptive: Determines 'Elite' ratio based on structure
 void Island::ApplySuccessionAdaptive(std::vector<Individual> &offspring_pool) {
   std::lock_guard<std::mutex> lock(population_mutex_);
-  
+
   if (!offspring_pool.empty()) {
     population_.reserve(population_.size() + offspring_pool.size());
     for (auto &child : offspring_pool) {
-         population_.push_back(std::move(child));
+      population_.push_back(std::move(child));
     }
   }
-  if (population_.empty()) return;
+  if (population_.empty())
+    return;
 
   // Deduplication
   std::sort(population_.begin(), population_.end(),
             [](const Individual &a, const Individual &b) {
               return a.GetFitness() < b.GetFitness();
             });
-            
+
   std::vector<Individual> unique_candidates;
   unique_candidates.reserve(population_.size());
   std::unordered_set<uint64_t> used_hashes;
-  
+
   for (const auto &ind : population_) {
-      uint64_t h = HashGenotype64(ind.GetGenotype());
-      if (used_hashes.find(h) == used_hashes.end()) {
-          used_hashes.insert(h);
-          unique_candidates.push_back(ind); // Copy needed as we iterate const ref but push back
-      }
+    uint64_t h = HashGenotype64(ind.GetGenotype());
+    if (used_hashes.find(h) == used_hashes.end()) {
+      used_hashes.insert(h);
+      unique_candidates.push_back(
+          ind); // Copy needed as we iterate const ref but push back
+    }
   }
   population_ = std::move(unique_candidates);
 
   if ((int)population_.size() <= population_size_) {
-     UpdateBiasedFitness();
-     return;
+    UpdateBiasedFitness();
+    return;
   }
 
   // Calculate Dynamic Elite Ratio based on Structural Diversity
   double relative_div = 0.0;
   if (max_diversity_baseline_ > 1e-9) {
-    relative_div = (current_structural_diversity_ - min_diversity_baseline_) / 
+    relative_div = (current_structural_diversity_ - min_diversity_baseline_) /
                    (max_diversity_baseline_ - min_diversity_baseline_);
   }
   relative_div = std::max(0.0, std::min(1.0, relative_div));
@@ -1858,80 +1798,93 @@ void Island::ApplySuccessionAdaptive(std::vector<Individual> &offspring_pool) {
   // Determine split based on island type:
   // Explorer: Always maintain high diversity (even when chaotic)
   // Exploiter: Focus on elitism, allow more convergence
-  
+
   double elite_ratio;
   if (IsExploration()) {
-      // Explorer: 10% elite at low div, 50% elite at high div
-      elite_ratio = MapRange(relative_div, 0.0, 1.0, Config::ELITE_RATIO_EXPLORATION_LOW, Config::ELITE_RATIO_EXPLORATION_HIGH);
+    // Explorer: 10% elite at low div, 50% elite at high div
+    elite_ratio =
+        MapRange(relative_div, 0.0, 1.0, Config::ELITE_RATIO_EXPLORATION_LOW,
+                 Config::ELITE_RATIO_EXPLORATION_HIGH);
   } else {
-      // Exploiter: 30% elite at low div, 90% elite at high div
-      elite_ratio = MapRange(relative_div, 0.0, 1.0, Config::ELITE_RATIO_EXPLOITATION_LOW, Config::ELITE_RATIO_EXPLOITATION_HIGH);
+    // Exploiter: 30% elite at low div, 90% elite at high div
+    elite_ratio =
+        MapRange(relative_div, 0.0, 1.0, Config::ELITE_RATIO_EXPLOITATION_LOW,
+                 Config::ELITE_RATIO_EXPLOITATION_HIGH);
   }
-  
+
   // Apply selection
   int elite_count = (int)(population_size_ * elite_ratio);
   elite_count = std::max(2, elite_count); // Always keep at least top 2
-  
+
   std::vector<Individual> next_pop;
   next_pop.reserve(population_size_);
   std::unordered_set<int> taken_indices;
-  
+
   // 1. Take Elites (Pure Fitness)
   for (int i = 0; i < (int)population_.size(); ++i) {
-      if ((int)next_pop.size() >= elite_count) break;
-      next_pop.push_back(population_[i]);
-      taken_indices.insert(i);
+    if ((int)next_pop.size() >= elite_count)
+      break;
+    next_pop.push_back(population_[i]);
+    taken_indices.insert(i);
   }
-  
+
   // 2. Take Diverse (Biased Fitness)
   if ((int)next_pop.size() < population_size_) {
-       UpdateBiasedFitness(); // Recalculate diversity ranks on FULL pool
-       
-       std::vector<int> biased_indices(population_.size());
-       std::iota(biased_indices.begin(), biased_indices.end(), 0);
-       std::sort(biased_indices.begin(), biased_indices.end(), [&](int a, int b){
-           return population_[a].GetBiasedFitness() < population_[b].GetBiasedFitness();
-       });
-       
-       for (int idx : biased_indices) {
-           if ((int)next_pop.size() >= population_size_) break;
-           if (taken_indices.find(idx) == taken_indices.end()) {
-               next_pop.push_back(population_[idx]);
-               taken_indices.insert(idx);
-           }
-       }
+    UpdateBiasedFitness(); // Recalculate diversity ranks on FULL pool
+
+    std::vector<int> biased_indices(population_.size());
+    std::iota(biased_indices.begin(), biased_indices.end(), 0);
+    std::sort(biased_indices.begin(), biased_indices.end(), [&](int a, int b) {
+      return population_[a].GetBiasedFitness() <
+             population_[b].GetBiasedFitness();
+    });
+
+    for (int idx : biased_indices) {
+      if ((int)next_pop.size() >= population_size_)
+        break;
+      if (taken_indices.find(idx) == taken_indices.end()) {
+        next_pop.push_back(population_[idx]);
+        taken_indices.insert(idx);
+      }
+    }
   }
-  
+
   // 3. Fallback (if still needed)
   if ((int)next_pop.size() < population_size_) {
-      for (int i = 0; i < (int)population_.size(); ++i) {
-          if ((int)next_pop.size() >= population_size_) break;
-          if (taken_indices.find(i) == taken_indices.end()) {
-              next_pop.push_back(population_[i]);
-          }
+    for (int i = 0; i < (int)population_.size(); ++i) {
+      if ((int)next_pop.size() >= population_size_)
+        break;
+      if (taken_indices.find(i) == taken_indices.end()) {
+        next_pop.push_back(population_[i]);
       }
+    }
   }
-  
+
   population_ = std::move(next_pop);
-  
+
   // Sort final population by fitness
-  std::sort(population_.begin(), population_.end(), [](const Individual& a, const Individual& b){
-      return a.GetFitness() < b.GetFitness();
-  });
-  
+  std::sort(population_.begin(), population_.end(),
+            [](const Individual &a, const Individual &b) {
+              return a.GetFitness() < b.GetFitness();
+            });
+
   UpdateBiasedFitness(); // Final update for next gen stats
 }
 
 #ifdef RESEARCH
-std::vector<int> Island::CanonicalizeGenotype(const std::vector<int> &genotype, int num_groups) const {
-  if (genotype.empty()) return {};
+std::vector<int> Island::CanonicalizeGenotype(const std::vector<int> &genotype,
+                                              int num_groups) const {
+  if (genotype.empty())
+    return {};
   std::vector<int> canonical = genotype;
   std::vector<int> mapping(num_groups + 1, -1);
   int next_new_id = 0;
   for (size_t i = 0; i < canonical.size(); ++i) {
     int old_id = canonical[i];
-    if (old_id < 0 || old_id >= (int)mapping.size()) continue;
-    if (mapping[old_id] == -1) mapping[old_id] = next_new_id++;
+    if (old_id < 0 || old_id >= (int)mapping.size())
+      continue;
+    if (mapping[old_id] == -1)
+      mapping[old_id] = next_new_id++;
     canonical[i] = mapping[old_id];
   }
   return canonical;
@@ -1963,16 +1916,17 @@ void Island::ExportState(int generation, bool is_catastrophe) const {
 #endif
 
 int Island::SelectParentIndex() {
-  if (population_.empty()) return -1;
+  if (population_.empty())
+    return -1;
   int pop_size = static_cast<int>(population_.size());
   std::uniform_int_distribution<int> dist(0, pop_size - 1);
   double best_val = std::numeric_limits<double>::max();
   int best_idx = -1;
 
-  int tournament_size = IsExploration() ? Config::EXPLORATION_TOURNAMENT_SIZE 
+  int tournament_size = IsExploration() ? Config::EXPLORATION_TOURNAMENT_SIZE
                                         : Config::EXPLOITATION_TOURNAMENT_SIZE;
   int t_size = std::min(tournament_size, pop_size);
-  
+
   for (int i = 0; i < t_size; ++i) {
     int idx = dist(rng_);
     if (population_[idx].GetBiasedFitness() < best_val) {
@@ -1984,8 +1938,9 @@ int Island::SelectParentIndex() {
 }
 
 int Island::GetWorstBiasedIndex() const {
-  if (population_.empty()) return -1;
-  
+  if (population_.empty())
+    return -1;
+
   std::vector<int> best_genotype_copy;
   {
     std::lock_guard<std::mutex> lock(best_mutex_);
@@ -1996,7 +1951,8 @@ int Island::GetWorstBiasedIndex() const {
   int worst = -1;
   double max_val = -1.0;
   for (int i = 0; i < pop_size; ++i) {
-    if (population_[i].GetGenotype() == best_genotype_copy) continue;
+    if (population_[i].GetGenotype() == best_genotype_copy)
+      continue;
     if (population_[i].GetBiasedFitness() > max_val) {
       max_val = population_[i].GetBiasedFitness();
       worst = i;
@@ -2006,7 +1962,8 @@ int Island::GetWorstBiasedIndex() const {
 }
 
 int Island::GetWorstIndex() const {
-  if (population_.empty()) return -1;
+  if (population_.empty())
+    return -1;
   int pop_size = static_cast<int>(population_.size());
   int idx = 0;
   double worst = -1.0;
@@ -2019,87 +1976,145 @@ int Island::GetWorstIndex() const {
   return idx;
 }
 
-
-
 void Island::InjectImmigrant(Individual &imigrant) {
   auto now = std::chrono::steady_clock::now();
-  
-  // IMMUNITY CHECK 1: catastrophe recovery period
+
+  // IMMUNITY CHECK: catastrophe recovery period
   if (now < immune_until_time_) {
-    // BUT: if stagnation > 2000, end quarantine early - island needs fresh genes!
     long long stagnation = current_generation_ - last_improvement_gen_;
     if (stagnation < 2000) {
-      return;  // island is immune after catastrophe
+      return; // island is immune after catastrophe
     }
-    // else: allow migration despite immunity (island is stuck)
+  }
+
+  // OPPORTUNITY CHECK: Check if migrant is significantly better (>1%) than current best
+  double best_fit;
+  {
+      std::lock_guard<std::mutex> lock(best_mutex_);
+      best_fit = current_best_.GetFitness();
   }
   
-  // IMMUNITY CHECK 2: dynamic progress immunity - don't disturb if making progress
-  double since_improvement = std::chrono::duration<double>(now - last_improvement_time_).count();
-  if (since_improvement < Config::PROGRESS_IMMUNITY_SECONDS) {
-    return;  // island is on a hot streak, don't disturb!
-  }
-  
+  // Evaluate if not already
   double fit;
   if (imigrant.IsEvaluated()) {
     fit = imigrant.GetFitness();
   } else {
-    EvaluationResult res = evaluator_->EvaluateWithStats(imigrant.GetGenotype());
+    EvaluationResult res =
+        evaluator_->EvaluateWithStats(imigrant.GetGenotype());
     fit = res.fitness;
     imigrant.SetFitness(fit);
     imigrant.SetReturnCount(res.returns);
   }
 
-  if (fit != std::numeric_limits<double>::max()) {
-    double best_fit;
-    {
-      std::lock_guard<std::mutex> best_lock(best_mutex_);
-      best_fit = current_best_.GetFitness();
-    }
-    double dist_to_best = std::abs(fit - best_fit);
-    if (dist_to_best < 500.0 && fit >= best_fit) return;
+  if (fit == std::numeric_limits<double>::max())
+    return;
 
-    std::lock_guard<std::mutex> lock(population_mutex_);
-    immigration_queue_.push_back(imigrant);
+  bool is_stuck = is_stuck_.load(std::memory_order_relaxed);
+  bool is_opportunity = (fit < best_fit * 0.99); // 1% better
+
+  // Default: Only accept migrants when island is stuck
+  // NEW: Also accept if it's a huge opportunity
+  if (!is_stuck && !is_opportunity) {
+    return; // Island is making progress and this isn't a breakthrough, don't disturb!
+  }
+
+  std::lock_guard<std::mutex> lock(population_mutex_);
+
+  // REPLACE MOST SIMILAR: Replace the individual most structurally similar
+  // to the immigrant (smallest BPD), enabling better diversification
+  int similar_idx = FindMostSimilarIndex(imigrant);
+  if (similar_idx >= 0 && similar_idx < (int)population_.size()) {
+    // Only replace if immigrant is better or similar has stagnated
+    if (imigrant.GetFitness() < population_[similar_idx].GetFitness() ||
+        population_[similar_idx].GetStagnation() > 100) {
+      population_[similar_idx] = imigrant;
+
+      // Check if new global best
+      std::lock_guard<std::mutex> best_lock(best_mutex_);
+      if (imigrant.GetFitness() < current_best_.GetFitness()) {
+        current_best_ = imigrant;
+        last_improvement_gen_ = current_generation_;
+        last_improvement_time_ = now;
+      }
+    }
+  }
+
+  // === IMMEDIATE PATH RELINKING ===
+  // Attempt to combine our Current Best with the fresh Immigrant
+  // We use the Immigrant as the GUIDE, and try to move our Best towards it.
+  {
+      Individual pr_runner;
+      double best_fit;
+      {
+          std::lock_guard<std::mutex> best_lock(best_mutex_);
+          pr_runner = current_best_;
+          best_fit = current_best_.GetFitness();
+      }
+
+      // Only run PR if meaningful (don't run if solutions are identical)
+      if (std::abs(pr_runner.GetFitness() - imigrant.GetFitness()) > 1e-4) {
+          local_search_.SetGuideSolution(imigrant.GetGenotype());
+          
+          // Run VND on our copy. Because 'guide_solution_' is set, 
+          // LocalSearch will attempt Path Relinking if VND stalls.
+          // We use current_best_ as start point because it's locally optimal, 
+          // so VND will likely trigger PR immediately.
+          local_search_.RunVND(pr_runner);
+
+          // If we found something better than BOTH, apply it
+          std::lock_guard<std::mutex> best_lock(best_mutex_);
+          if (pr_runner.GetFitness() < current_best_.GetFitness()) {
+              std::cout << " [PR-MIG] Immediate Path Relinking SUCCESS! " 
+                        << (int)current_best_.GetFitness() << " -> " 
+                        << (int)pr_runner.GetFitness() << std::endl;
+              current_best_ = pr_runner;
+              last_improvement_gen_ = current_generation_;
+              last_improvement_time_ = std::chrono::steady_clock::now();
+          }
+      }
   }
 }
 
-void Island::MutateIndividual(Individual& indiv) {
-    // Force a strong mutation regardless of current probability settings
-    // This is used for migration sabotage/diversification
-    std::uniform_real_distribution<double> d(0.0, 1.0);
-    double r = d(rng_);
-    
-    if (r < 0.5) {
-        mutator_.ApplyRuinRecreate(indiv, 0.3, false, rng_); // 30% ruin (exploration)
-    } else {
-        mutator_.ApplySmartSpatialMove(indiv, rng_);
-    }
-    
-    // Evaluate immediately to ensure consistency
-    double fit = SafeEvaluate(indiv);
-    indiv.SetFitness(fit);
+void Island::MutateIndividual(Individual &indiv) {
+  // Force a strong mutation regardless of current probability settings
+  // This is used for migration sabotage/diversification
+  std::uniform_real_distribution<double> d(0.0, 1.0);
+  double r = d(rng_);
+
+  if (r < 0.5) {
+    mutator_.ApplyRuinRecreate(indiv, 0.3, false,
+                               rng_); // 30% ruin (exploration)
+  } else {
+    mutator_.ApplySmartSpatialMove(indiv, rng_);
+  }
+
+  // Evaluate immediately to ensure consistency
+  double fit = SafeEvaluate(indiv);
+  indiv.SetFitness(fit);
 }
 
 Individual Island::GetRandomIndividual() {
   std::lock_guard<std::mutex> lock(population_mutex_);
-  if (population_.empty()) return current_best_;
+  if (population_.empty())
+    return current_best_;
   std::uniform_int_distribution<int> dist(0, (int)population_.size() - 1);
   return population_[dist(rng_)];
 }
 
-Individual Island::GetMostDiverseMigrantFor(const Individual& target_best) {
+Individual Island::GetMostDiverseMigrantFor(const Individual &target_best) {
   std::lock_guard<std::mutex> lock(population_mutex_);
-  if (population_.empty()) return current_best_;
-  
-  const std::vector<int>& perm = evaluator_->GetPermutation();
+  if (population_.empty())
+    return current_best_;
+
+  const std::vector<int> &perm = evaluator_->GetPermutation();
   int num_groups = evaluator_->GetNumGroups();
-  
+
   int best_idx = 0;
   int max_distance = -1;
-  
+
   for (int i = 0; i < (int)population_.size(); ++i) {
-    int distance = CalculateBrokenPairsDistance(population_[i], target_best, perm, num_groups);
+    int distance = CalculateBrokenPairsDistance(population_[i], target_best,
+                                                perm, num_groups);
     if (distance > max_distance) {
       max_distance = distance;
       best_idx = i;
@@ -2110,13 +2125,101 @@ Individual Island::GetMostDiverseMigrantFor(const Individual& target_best) {
 
 Individual Island::GetRandomEliteIndividual() {
   std::lock_guard<std::mutex> lock(population_mutex_);
-  if (population_.empty()) return current_best_;
-  
+  if (population_.empty())
+    return current_best_;
+
   // Population should be sorted by fitness (best first)
   // Pick random from top 30%
   int elite_size = std::max(1, (int)(population_.size() * 0.30));
   std::uniform_int_distribution<int> dist(0, elite_size - 1);
   return population_[dist(rng_)];
+}
+
+int Island::FindMostSimilarIndex(const Individual &immigrant) const {
+  // Find the individual most similar to immigrant (smallest BPD)
+  // Called with population_mutex_ already held
+  if (population_.empty())
+    return -1;
+
+  const std::vector<int> &perm = evaluator_->GetPermutation();
+  int num_groups = evaluator_->GetNumGroups();
+
+  int best_idx = -1;
+  int min_bpd = INT_MAX;
+
+  for (int i = 0; i < (int)population_.size(); ++i) {
+    int bpd = const_cast<Island *>(this)->CalculateBrokenPairsDistance(
+        population_[i], immigrant, perm, num_groups);
+    if (bpd < min_bpd) {
+      min_bpd = bpd;
+      best_idx = i;
+    }
+  }
+  return best_idx;
+}
+
+void Island::TryPullMigrant() {
+  // Asynchronous migration: pull migrant from predecessor
+  if (!ring_predecessor_)
+    return;
+
+  // Check migration interval
+  if (current_generation_ - last_migration_gen_ < MIGRATION_INTERVAL)
+    return;
+
+  // === GENE MIGRATION (Route Segments) ===
+  // Pull top 5 best routes from neighbor and inject into our pool
+  // This enriches the gene pool for Frankenstein (Beam Search)
+  if (IsExploitation()) { // Usually only exploitation islands use Frankenstein/RoutePool
+      auto top_routes = ring_predecessor_->GetTopRoutes(5);
+      if (!top_routes.empty()) {
+          std::lock_guard<std::mutex> lock(best_mutex_);
+          route_pool_.ImportRoutes(top_routes);
+      }
+  }
+
+
+  // REMOVED early return: checks are now inside InjectImmigrant to support Opportunity Pulls
+  // if (!is_stuck_.load(std::memory_order_relaxed)) return;
+
+  // Get best for comparison
+  Individual my_best;
+  {
+    std::lock_guard<std::mutex> lock(best_mutex_);
+    my_best = current_best_;
+  }
+
+  // === HYBRID STRATEGY: CHASE vs DIVERSIFY ===
+  // 1. Check neighbor's absolute BEST.
+  Individual neighbor_best = ring_predecessor_->GetBestIndividual();
+  
+  Individual migrant;
+  bool chase_mode = false;
+
+  // If neighbor is significantly better (>1%), ignore diversity and CHASE the best solution.
+  // This prevents the "Golden Solution Trap" where we ignore a breakthrough because it's "too similar".
+  if (neighbor_best.GetFitness() < my_best.GetFitness() * 0.99) {
+      migrant = neighbor_best;
+      chase_mode = true;
+      std::cout << "\033[32m [MIG I" << id_ << "] CHASE MODE! Pulling Golden Solution: " 
+                << (int)neighbor_best.GetFitness() << " (My Best: " << (int)my_best.GetFitness() << ")\033[0m" << std::endl;
+  } else {
+      // 2. Otherwise, standard Diversity Pull to maintain population variety
+      migrant = ring_predecessor_->GetMostDiverseMigrantFor(my_best);
+  }
+
+  // Check for opportunity logging (for debug)
+  if (!chase_mode && migrant.GetFitness() < my_best.GetFitness() * 0.99) {
+       // This implies diversity pull accidentally found something great
+       std::cout << "\033[33m [MIG I" << id_ << "] Opportunity Pull (Diverse)! " 
+                 << (int)migrant.GetFitness() << " < " << (int)my_best.GetFitness() << "\033[0m" << std::endl;
+  }
+
+  last_migration_gen_ = current_generation_;
+
+  // Inject the migrant (InjectImmigrant handles logic: Stuck OR Opportunity)
+  // AND performs Immediate Path Relinking
+  InjectImmigrant(migrant);
 }
 
 void Island::CalibrateDiversity() {
@@ -2141,8 +2244,10 @@ void Island::CalibrateDiversity() {
   for (int i = 0; i < SAMPLE_SIZE; ++i) {
     for (int k = 0; k < PROBES_PER_IND; ++k) {
       int other_idx = rng_() % SAMPLE_SIZE;
-      if (i == other_idx) continue;
-      int dist = CalculateBrokenPairsDistance(random_samples[i], random_samples[other_idx], perm, num_groups);
+      if (i == other_idx)
+        continue;
+      int dist = CalculateBrokenPairsDistance(
+          random_samples[i], random_samples[other_idx], perm, num_groups);
       total_broken_pairs += dist;
       comparisons_count++;
     }
@@ -2188,8 +2293,10 @@ void Island::CalibrateConvergence() {
   for (int i = 0; i < SAMPLE_SIZE; ++i) {
     for (int k = 0; k < PROBES_PER_IND; ++k) {
       int other_idx = rng_() % SAMPLE_SIZE;
-      if (i == other_idx) continue;
-      int dist = CalculateBrokenPairsDistance(converged_samples[i], converged_samples[other_idx], perm, num_groups);
+      if (i == other_idx)
+        continue;
+      int dist = CalculateBrokenPairsDistance(
+          converged_samples[i], converged_samples[other_idx], perm, num_groups);
       total_broken_pairs += dist;
       comparisons_count++;
     }
@@ -2205,48 +2312,64 @@ void Island::CalibrateConvergence() {
 
 double Island::MapRange(double value, double in_min, double in_max,
                         double out_min, double out_max) const {
-  if (in_max - in_min < 1e-9) return out_min;
+  if (in_max - in_min < 1e-9)
+    return out_min;
   double clamped = std::max(in_min, std::min(in_max, value));
   return out_min + (out_max - out_min) * (clamped - in_min) / (in_max - in_min);
 }
 
-
 int Island::GetVndIterations() const {
-  int base_min = IsExploration() ? Config::EXPLORATION_VND_MIN : Config::EXPLOITATION_VND_MIN;
-  int base_max = IsExploration() ? Config::EXPLORATION_VND_MAX : Config::EXPLOITATION_VND_MAX;
-  
-  // ADAPTIVE CAP: For huge instances, cap the MAX iterations to prevent stagnation
+  int base_min = IsExploration() ? Config::EXPLORATION_VND_MIN
+                                 : Config::EXPLOITATION_VND_MIN;
+  int base_max = IsExploration() ? Config::EXPLORATION_VND_MAX
+                                 : Config::EXPLOITATION_VND_MAX;
+
+  // ADAPTIVE CAP: Scale VND iterations based on problem size
   int problem_size = evaluator_->GetSolutionSize();
-  if (problem_size > 1000) {
-      base_max = std::min(base_max, 20); // Hard cap at 20 iterations for >1000 clients
-      base_min = std::min(base_min, 5);
+  if (problem_size > Config::HUGE_INSTANCE_THRESHOLD) {
+    // n > 3000: very aggressive reduction
+    base_max = IsExploration() ? 1 : 8;
+    base_min = 1;
+  } else if (problem_size > Config::LARGE_INSTANCE_THRESHOLD) {
+    // n > 1500: use large instance constants
+    base_max = IsExploration() ? Config::EXPLORATION_VND_MAX_LARGE 
+                               : Config::EXPLOITATION_VND_MAX_LARGE;
+    base_min = std::min(base_min, 3);
   }
-  
-  double result = base_max - (current_structural_diversity_ * (base_max - base_min));
-  return static_cast<int>(std::max((double)base_min, std::min((double)base_max, result)));
+
+  double result =
+      base_max - (current_structural_diversity_ * (base_max - base_min));
+  return static_cast<int>(
+      std::max((double)base_min, std::min((double)base_max, result)));
 }
 
 double Island::GetMutationRate() const {
   if (IsExploration()) {
-    return MapRange(current_structural_diversity_, min_diversity_baseline_, max_diversity_baseline_, 0.50, 0.20);
+    return MapRange(current_structural_diversity_, min_diversity_baseline_,
+                    max_diversity_baseline_, 0.50, 0.20);
   } else {
-    return MapRange(current_structural_diversity_, min_diversity_baseline_, max_diversity_baseline_, 0.15, 0.05);
+    return MapRange(current_structural_diversity_, min_diversity_baseline_,
+                    max_diversity_baseline_, 0.15, 0.05);
   }
 }
 
 double Island::GetRuinChance() const {
   if (IsExploration()) {
-    return MapRange(current_structural_diversity_, min_diversity_baseline_, max_diversity_baseline_, 0.50, 0.20);
+    return MapRange(current_structural_diversity_, min_diversity_baseline_,
+                    max_diversity_baseline_, 0.50, 0.20);
   } else {
-    return MapRange(current_structural_diversity_, min_diversity_baseline_, max_diversity_baseline_, 0.15, 0.05);
+    return MapRange(current_structural_diversity_, min_diversity_baseline_,
+                    max_diversity_baseline_, 0.15, 0.05);
   }
 }
 
 double Island::GetMicrosplitChance() const {
   if (IsExploration()) {
-    return MapRange(current_structural_diversity_, min_diversity_baseline_, max_diversity_baseline_, 0.65, 0.4);
+    return MapRange(current_structural_diversity_, min_diversity_baseline_,
+                    max_diversity_baseline_, 0.65, 0.4);
   } else {
-    return MapRange(current_structural_diversity_, min_diversity_baseline_, max_diversity_baseline_, 0.3, 0.2);
+    return MapRange(current_structural_diversity_, min_diversity_baseline_,
+                    max_diversity_baseline_, 0.3, 0.2);
   }
 }
 
@@ -2268,313 +2391,374 @@ bool Island::TryGetStuckIndividual(Individual &out) {
 }
 
 Individual Island::ApplySREX(const Individual &p1, const Individual &p2) {
-    int num_clients = evaluator_->GetSolutionSize();
-    const std::vector<int> &g1 = p1.GetGenotype();
-    const std::vector<int> &g2 = p2.GetGenotype();
+  int num_clients = evaluator_->GetSolutionSize();
+  const std::vector<int> &g1 = p1.GetGenotype();
+  const std::vector<int> &g2 = p2.GetGenotype();
 
-    if (g1.size() != num_clients || g2.size() != num_clients) {
-        Individual rnd(num_clients); InitIndividual(rnd, INITIALIZATION_TYPE::RANDOM); return rnd;
+  if (g1.size() != num_clients || g2.size() != num_clients) {
+    Individual rnd(num_clients);
+    InitIndividual(rnd, INITIALIZATION_TYPE::RANDOM);
+    return rnd;
+  }
+
+  std::vector<int> child_genotype(num_clients, -1);
+  std::vector<bool> is_covered(num_clients, false);
+
+  // Helper lambda to build route map
+  auto build_routes = [&](const std::vector<int> &g) {
+    int max_g = 0;
+    for (int x : g)
+      if (x > max_g)
+        max_g = x;
+    if (max_g > num_clients)
+      max_g = num_clients;
+    std::vector<std::vector<int>> routes(max_g + 1);
+    for (int i = 0; i < num_clients; ++i) {
+      if (g[i] >= 0 && g[i] <= max_g)
+        routes[g[i]].push_back(i);
+    }
+    return routes;
+  };
+
+  auto routes1 = build_routes(g1);
+  auto routes2 = build_routes(g2);
+
+  std::vector<int> active1, active2;
+  for (size_t i = 0; i < routes1.size(); ++i)
+    if (!routes1[i].empty())
+      active1.push_back((int)i);
+  for (size_t i = 0; i < routes2.size(); ++i)
+    if (!routes2[i].empty())
+      active2.push_back((int)i);
+
+  if (!active1.empty())
+    std::shuffle(active1.begin(), active1.end(), rng_);
+  if (!active2.empty())
+    std::shuffle(active2.begin(), active2.end(), rng_);
+
+  int current_child_group = 0;
+  std::vector<int> child_group_loads;
+  child_group_loads.reserve(num_clients);
+
+  // inherit 50% from P1
+  int take1 = std::max(1, (int)active1.size() / 2);
+  for (int i = 0; i < take1 && i < (int)active1.size(); ++i) {
+    int g_idx = active1[i];
+    int load = 0;
+    for (int client : routes1[g_idx]) {
+      child_genotype[client] = current_child_group;
+      is_covered[client] = true;
+      load += evaluator_->GetDemand(client + 2); // ID mapping
+    }
+    child_group_loads.push_back(load);
+    current_child_group++;
+  }
+
+  // inherit from P2 if no conflict
+  for (int g_idx : active2) {
+    bool conflict = false;
+    for (int client : routes2[g_idx]) {
+      if (is_covered[client]) {
+        conflict = true;
+        break;
+      }
+    }
+    if (!conflict) {
+      int load = 0;
+      for (int client : routes2[g_idx]) {
+        child_genotype[client] = current_child_group;
+        is_covered[client] = true;
+        load += evaluator_->GetDemand(client + 2);
+      }
+      child_group_loads.push_back(load);
+      current_child_group++;
+    }
+  }
+
+  // REGRET-3 REPAIR with EJECTION CHAIN: prioritize clients with fewer options
+  // (biggest gap between best, 2nd, and 3rd-best insertion cost)
+  std::vector<int> unassigned;
+  for (int i = 0; i < num_clients; ++i)
+    if (!is_covered[i])
+      unassigned.push_back(i);
+
+  // SAFETY: limit iterations to prevent infinite loops from ejection chain
+  int max_iterations =
+      num_clients * 3; // allow up to 3x client count iterations
+  int iteration_count = 0;
+  int ejection_count = 0;
+  const int MAX_EJECTIONS = 10; // limit total ejections per SREX
+
+  while (!unassigned.empty() && iteration_count < max_iterations) {
+    iteration_count++;
+    int best_client = -1;
+    int best_group = -1;
+    double max_regret = -1e30;
+
+    for (int client : unassigned) {
+      int demand = evaluator_->GetDemand(client + 2);
+
+      // Find best, second-best, and third-best feasible groups
+      double cost1 = 1e30, cost2 = 1e30,
+             cost3 = 1e30; // best, 2nd, 3rd load fit
+      int group1 = -1;
+
+      for (size_t g = 0; g < child_group_loads.size(); ++g) {
+        if (child_group_loads[g] + demand <= capacity_) {
+          double load_ratio =
+              (double)(child_group_loads[g] + demand) / capacity_;
+          if (load_ratio < cost1) {
+            cost3 = cost2;
+            cost2 = cost1;
+            cost1 = load_ratio;
+            group1 = (int)g;
+          } else if (load_ratio < cost2) {
+            cost3 = cost2;
+            cost2 = load_ratio;
+          } else if (load_ratio < cost3) {
+            cost3 = load_ratio;
+          }
+        }
+      }
+
+      // REGRET-3: sum of (2nd - 1st) + (3rd - 1st)
+      // Higher regret = client has fewer good options -> insert first!
+      double regret;
+      if (group1 >= 0) {
+        double r2 = (cost2 < 1e29) ? (cost2 - cost1) : 0.5;
+        double r3 = (cost3 < 1e29) ? (cost3 - cost1) : 0.5;
+        regret = r2 + r3; // Regret-3
+        if (cost2 >= 1e29)
+          regret = 1e10; // only ONE option - critical
+      } else {
+        regret = 1e20; // NO options - must create new group, highest priority
+      }
+
+      if (regret > max_regret) {
+        max_regret = regret;
+        best_client = client;
+        best_group = group1;
+      }
     }
 
-    std::vector<int> child_genotype(num_clients, -1);
-    std::vector<bool> is_covered(num_clients, false);
-    
-    // Helper lambda to build route map
-    auto build_routes = [&](const std::vector<int>& g) {
-        int max_g = 0;
-        for (int x : g) if (x > max_g) max_g = x;
-        if (max_g > num_clients) max_g = num_clients;
-        std::vector<std::vector<int>> routes(max_g + 1);
-        for (int i = 0; i < num_clients; ++i) {
-            if (g[i] >= 0 && g[i] <= max_g) routes[g[i]].push_back(i);
-        }
-        return routes;
-    };
+    if (best_client < 0)
+      break; // safety
 
-    auto routes1 = build_routes(g1);
-    auto routes2 = build_routes(g2);
+    int demand = evaluator_->GetDemand(best_client + 2);
 
-    std::vector<int> active1, active2;
-    for (size_t i = 0; i < routes1.size(); ++i) if (!routes1[i].empty()) active1.push_back((int)i);
-    for (size_t i = 0; i < routes2.size(); ++i) if (!routes2[i].empty()) active2.push_back((int)i);
-
-    if (!active1.empty()) std::shuffle(active1.begin(), active1.end(), rng_);
-    if (!active2.empty()) std::shuffle(active2.begin(), active2.end(), rng_);
-
-    int current_child_group = 0;
-    std::vector<int> child_group_loads;
-    child_group_loads.reserve(num_clients);
-
-    // inherit 50% from P1
-    int take1 = std::max(1, (int)active1.size() / 2);
-    for (int i = 0; i < take1 && i < (int)active1.size(); ++i) {
-        int g_idx = active1[i];
-        int load = 0;
-        for (int client : routes1[g_idx]) {
-            child_genotype[client] = current_child_group;
-            is_covered[client] = true;
-            load += evaluator_->GetDemand(client + 2); // ID mapping
-        }
-        child_group_loads.push_back(load);
-        current_child_group++;
+    if (best_group >= 0) {
+      // Insert into best group
+      child_genotype[best_client] = best_group;
+      child_group_loads[best_group] += demand;
+    } else {
+      // NO FEASIBLE GROUP - simple fallback: create new group
+      // (SREX Ejection Chain disabled - too complex, causes issues)
+      child_genotype[best_client] = current_child_group;
+      child_group_loads.push_back(demand);
+      current_child_group++;
     }
 
-    // inherit from P2 if no conflict
-    for (int g_idx : active2) {
-        bool conflict = false;
-        for (int client : routes2[g_idx]) {
-            if (is_covered[client]) { conflict = true; break; }
-        }
-        if (!conflict) {
-             int load = 0;
-             for (int client : routes2[g_idx]) {
-                 child_genotype[client] = current_child_group;
-                 is_covered[client] = true;
-                 load += evaluator_->GetDemand(client + 2);
-             }
-             child_group_loads.push_back(load);
-             current_child_group++;
-        }
-    }
+    // Remove from unassigned
+    unassigned.erase(
+        std::remove(unassigned.begin(), unassigned.end(), best_client),
+        unassigned.end());
+  }
 
-    // REGRET-3 REPAIR with EJECTION CHAIN: prioritize clients with fewer options
-    // (biggest gap between best, 2nd, and 3rd-best insertion cost)
-    std::vector<int> unassigned;
-    for (int i = 0; i < num_clients; ++i) if (!is_covered[i]) unassigned.push_back(i);
-    
-    // SAFETY: limit iterations to prevent infinite loops from ejection chain
-    int max_iterations = num_clients * 3;  // allow up to 3x client count iterations
-    int iteration_count = 0;
-    int ejection_count = 0;
-    const int MAX_EJECTIONS = 10;  // limit total ejections per SREX
-    
-    while (!unassigned.empty() && iteration_count < max_iterations) {
-        iteration_count++;
-        int best_client = -1;
-        int best_group = -1;
-        double max_regret = -1e30;
-        
-        for (int client : unassigned) {
-            int demand = evaluator_->GetDemand(client + 2);
-            
-            // Find best, second-best, and third-best feasible groups
-            double cost1 = 1e30, cost2 = 1e30, cost3 = 1e30;  // best, 2nd, 3rd load fit
-            int group1 = -1;
-            
-            for (size_t g = 0; g < child_group_loads.size(); ++g) {
-                if (child_group_loads[g] + demand <= capacity_) {
-                    double load_ratio = (double)(child_group_loads[g] + demand) / capacity_;
-                    if (load_ratio < cost1) {
-                        cost3 = cost2;
-                        cost2 = cost1;
-                        cost1 = load_ratio;
-                        group1 = (int)g;
-                    } else if (load_ratio < cost2) {
-                        cost3 = cost2;
-                        cost2 = load_ratio;
-                    } else if (load_ratio < cost3) {
-                        cost3 = load_ratio;
-                    }
-                }
-            }
-            
-            // REGRET-3: sum of (2nd - 1st) + (3rd - 1st)
-            // Higher regret = client has fewer good options -> insert first!
-            double regret;
-            if (group1 >= 0) {
-                double r2 = (cost2 < 1e29) ? (cost2 - cost1) : 0.5;
-                double r3 = (cost3 < 1e29) ? (cost3 - cost1) : 0.5;
-                regret = r2 + r3;  // Regret-3
-                if (cost2 >= 1e29) regret = 1e10;  // only ONE option - critical
-            } else {
-                regret = 1e20;  // NO options - must create new group, highest priority
-            }
-            
-            if (regret > max_regret) {
-                max_regret = regret;
-                best_client = client;
-                best_group = group1;
-            }
-        }
-        
-        if (best_client < 0) break;  // safety
-        
-        int demand = evaluator_->GetDemand(best_client + 2);
-        
-        if (best_group >= 0) {
-            // Insert into best group
-            child_genotype[best_client] = best_group;
-            child_group_loads[best_group] += demand;
-        } else {
-            // NO FEASIBLE GROUP - simple fallback: create new group
-            // (SREX Ejection Chain disabled - too complex, causes issues)
-            child_genotype[best_client] = current_child_group;
-            child_group_loads.push_back(demand);
-            current_child_group++;
-        }
-        
-        // Remove from unassigned
-        unassigned.erase(std::remove(unassigned.begin(), unassigned.end(), best_client), unassigned.end());
-    }
-
-    Individual child(child_genotype);
-    child.Canonicalize();
-    return child;
+  Individual child(child_genotype);
+  child.Canonicalize();
+  return child;
 }
 
 // === MERGE-REGRET OPERATOR ===
-// Dissolves 2 closest routes by centroid and repairs with Regret-3
+// Dissolves 2 routes with most shared neighbors and repairs with Regret-3
 // Designed for tight-capacity problems (Slack < 10)
-bool Island::ApplyMergeRegret(Individual& ind) {
-    std::vector<int>& genotype = ind.AccessGenotype();
-    int num_clients = static_cast<int>(genotype.size());
-    int num_groups = evaluator_->GetNumGroups();
-    
-    if (num_groups < 3) return false;  // need at least 3 routes
-    
-    // Build route data: members and centroids
-    struct RouteInfo {
-        int group_id;
-        std::vector<int> clients;
-        double cx, cy;  // centroid
-        int load;
-    };
-    std::vector<RouteInfo> routes;
-    routes.reserve(num_groups);
-    
-    for (int g = 0; g < num_groups; ++g) {
-        RouteInfo ri;
-        ri.group_id = g;
-        ri.cx = 0; ri.cy = 0; ri.load = 0;
-        
-        for (int c = 0; c < num_clients; ++c) {
-            if (genotype[c] == g) {
-                ri.clients.push_back(c);
-                int cid = c + 2;  // customer ID (matrix index)
-                const auto& coord = geometry_.GetCoordinate(cid);
-                ri.cx += coord.x;
-                ri.cy += coord.y;
-                ri.load += evaluator_->GetDemand(cid);
-            }
-        }
-        
-        if (!ri.clients.empty()) {
-            ri.cx /= ri.clients.size();
-            ri.cy /= ri.clients.size();
-            routes.push_back(ri);
-        }
-    }
-    
-    if (routes.size() < 3) return false;
-    
-    // Find 2 closest routes by centroid distance
-    double min_dist = 1e30;
-    int best_i = 0, best_j = 1;
-    for (size_t i = 0; i < routes.size(); ++i) {
-        for (size_t j = i + 1; j < routes.size(); ++j) {
-            double dx = routes[i].cx - routes[j].cx;
-            double dy = routes[i].cy - routes[j].cy;
-            double dist = dx*dx + dy*dy;
-            if (dist < min_dist) {
-                min_dist = dist;
-                best_i = i;
-                best_j = j;
-            }
-        }
-    }
-    
-    // Dissolve: collect clients from both routes
-    std::vector<int> dissolved;
-    for (int c : routes[best_i].clients) {
-        dissolved.push_back(c);
-        genotype[c] = -1;  // mark unassigned
-    }
-    for (int c : routes[best_j].clients) {
-        dissolved.push_back(c);
-        genotype[c] = -1;
-    }
-    
-    if (dissolved.empty()) return false;
-    
-    // Build group loads for remaining routes
-    std::vector<int> group_loads(num_groups, 0);
+bool Island::ApplyMergeRegret(Individual &ind) {
+  std::vector<int> &genotype = ind.AccessGenotype();
+  int num_clients = static_cast<int>(genotype.size());
+  int num_groups = evaluator_->GetNumGroups();
+
+  if (num_groups < 3)
+    return false; // need at least 3 routes
+
+  // Build route data: members and loads
+  struct RouteInfo {
+    int group_id;
+    std::vector<int> clients;
+    int load;
+  };
+  std::vector<RouteInfo> routes;
+  routes.reserve(num_groups);
+
+  for (int g = 0; g < num_groups; ++g) {
+    RouteInfo ri;
+    ri.group_id = g;
+    ri.load = 0;
+
     for (int c = 0; c < num_clients; ++c) {
-        if (genotype[c] >= 0 && genotype[c] < num_groups) {
-            group_loads[genotype[c]] += evaluator_->GetDemand(c + 2);
-        }
+      if (genotype[c] == g) {
+        ri.clients.push_back(c);
+        int cid = c + 2; // customer ID (matrix index)
+        ri.load += evaluator_->GetDemand(cid);
+      }
     }
-    
-    // Regret-3 repair (same logic as SREX)
-    int max_iterations = num_clients * 2;
-    int iteration = 0;
-    
-    while (!dissolved.empty() && iteration < max_iterations) {
-        iteration++;
-        
-        int best_client = -1;
-        int best_group = -1;
-        double max_regret = -1e30;
-        
-        for (int client : dissolved) {
-            int demand = evaluator_->GetDemand(client + 2);
-            
-            // Find best, 2nd, 3rd feasible groups
-            double cost1 = 1e30, cost2 = 1e30, cost3 = 1e30;
-            int group1 = -1;
-            
-            for (int g = 0; g < num_groups; ++g) {
-                if (group_loads[g] + demand <= capacity_) {
-                    double ratio = (double)(group_loads[g] + demand) / capacity_;
-                    if (ratio < cost1) {
-                        cost3 = cost2; cost2 = cost1; cost1 = ratio;
-                        group1 = g;
-                    } else if (ratio < cost2) {
-                        cost3 = cost2; cost2 = ratio;
-                    } else if (ratio < cost3) {
-                        cost3 = ratio;
-                    }
-                }
-            }
-            
-            // Regret-3: sum of differences
-            double regret;
-            if (group1 >= 0) {
-                double r2 = (cost2 < 1e29) ? (cost2 - cost1) : 0.5;
-                double r3 = (cost3 < 1e29) ? (cost3 - cost1) : 0.5;
-                regret = r2 + r3;
-                if (cost2 >= 1e29) regret = 1e10;  // only one option
-            } else {
-                regret = 1e20;  // no feasible group
-            }
-            
-            if (regret > max_regret) {
-                max_regret = regret;
-                best_client = client;
-                best_group = group1;
-            }
-        }
-        
-        if (best_client < 0) break;
-        
-        int demand = evaluator_->GetDemand(best_client + 2);
-        
-        if (best_group >= 0) {
-            genotype[best_client] = best_group;
-            group_loads[best_group] += demand;
-        } else {
-            // Find group with lowest load (force insert)
-            int min_load_g = 0;
-            for (int g = 1; g < num_groups; ++g) {
-                if (group_loads[g] < group_loads[min_load_g]) min_load_g = g;
-            }
-            genotype[best_client] = min_load_g;
-            group_loads[min_load_g] += demand;
-        }
-        
-        // Remove from dissolved
-        dissolved.erase(std::remove(dissolved.begin(), dissolved.end(), best_client), dissolved.end());
+
+    if (!ri.clients.empty()) {
+      routes.push_back(ri);
     }
-    
-    ind.Canonicalize();
-    return true;
+  }
+
+  if (routes.size() < 3)
+    return false;
+
+  // Find 2 routes with most shared neighbors (instead of centroid distance)
+  int max_shared = -1;
+  int best_i = 0, best_j = 1;
+
+  for (size_t i = 0; i < routes.size(); ++i) {
+    for (size_t j = i + 1; j < routes.size(); ++j) {
+      int shared_count = 0;
+
+      // Count how many clients in route i have neighbors in route j
+      for (int client_i : routes[i].clients) {
+        const auto &neighbors = geometry_.GetNeighbors(client_i);
+        for (int neighbor : neighbors) {
+          if (neighbor < num_clients &&
+              genotype[neighbor] == routes[j].group_id) {
+            shared_count++;
+            break; // only count once per client
+          }
+        }
+      }
+      // Also count from route j to route i
+      for (int client_j : routes[j].clients) {
+        const auto &neighbors = geometry_.GetNeighbors(client_j);
+        for (int neighbor : neighbors) {
+          if (neighbor < num_clients &&
+              genotype[neighbor] == routes[i].group_id) {
+            shared_count++;
+            break;
+          }
+        }
+      }
+
+      if (shared_count > max_shared) {
+        max_shared = shared_count;
+        best_i = i;
+        best_j = j;
+      }
+    }
+  }
+
+  // Dissolve: collect clients from both routes
+  std::vector<int> dissolved;
+  for (int c : routes[best_i].clients) {
+    dissolved.push_back(c);
+    genotype[c] = -1; // mark unassigned
+  }
+  for (int c : routes[best_j].clients) {
+    dissolved.push_back(c);
+    genotype[c] = -1;
+  }
+
+  if (dissolved.empty())
+    return false;
+
+  // Build group loads for remaining routes
+  std::vector<int> group_loads(num_groups, 0);
+  for (int c = 0; c < num_clients; ++c) {
+    if (genotype[c] >= 0 && genotype[c] < num_groups) {
+      group_loads[genotype[c]] += evaluator_->GetDemand(c + 2);
+    }
+  }
+
+  // Regret-3 repair (same logic as SREX)
+  int max_iterations = num_clients * 2;
+  int iteration = 0;
+
+  while (!dissolved.empty() && iteration < max_iterations) {
+    iteration++;
+
+    int best_client = -1;
+    int best_group = -1;
+    double max_regret = -1e30;
+
+    for (int client : dissolved) {
+      int demand = evaluator_->GetDemand(client + 2);
+
+      // Find best, 2nd, 3rd feasible groups
+      double cost1 = 1e30, cost2 = 1e30, cost3 = 1e30;
+      int group1 = -1;
+
+      for (int g = 0; g < num_groups; ++g) {
+        if (group_loads[g] + demand <= capacity_) {
+          double ratio = (double)(group_loads[g] + demand) / capacity_;
+          if (ratio < cost1) {
+            cost3 = cost2;
+            cost2 = cost1;
+            cost1 = ratio;
+            group1 = g;
+          } else if (ratio < cost2) {
+            cost3 = cost2;
+            cost2 = ratio;
+          } else if (ratio < cost3) {
+            cost3 = ratio;
+          }
+        }
+      }
+
+      // Regret-3: sum of differences
+      double regret;
+      if (group1 >= 0) {
+        double r2 = (cost2 < 1e29) ? (cost2 - cost1) : 0.5;
+        double r3 = (cost3 < 1e29) ? (cost3 - cost1) : 0.5;
+        regret = r2 + r3;
+        if (cost2 >= 1e29)
+          regret = 1e10; // only one option
+      } else {
+        regret = 1e20; // no feasible group
+      }
+
+      if (regret > max_regret) {
+        max_regret = regret;
+        best_client = client;
+        best_group = group1;
+      }
+    }
+
+    if (best_client < 0)
+      break;
+
+    int demand = evaluator_->GetDemand(best_client + 2);
+
+    if (best_group >= 0) {
+      genotype[best_client] = best_group;
+      group_loads[best_group] += demand;
+    } else {
+      // Find group with lowest load (force insert)
+      int min_load_g = 0;
+      for (int g = 1; g < num_groups; ++g) {
+        if (group_loads[g] < group_loads[min_load_g])
+          min_load_g = g;
+      }
+      genotype[best_client] = min_load_g;
+      group_loads[min_load_g] += demand;
+    }
+
+    // Remove from dissolved
+    dissolved.erase(
+        std::remove(dissolved.begin(), dissolved.end(), best_client),
+        dissolved.end());
+  }
+
+  ind.Canonicalize();
+  return true;
+}
+
+
+std::vector<CachedRoute> Island::GetTopRoutes(int n) const {
+    std::lock_guard<std::mutex> lock(best_mutex_);
+    // Note: RoutePool handles its own locking, but we hold best_mutex_ to access route_pool_ object safely if needed? 
+    // Actually route_pool_ is a member, accessing it is safe if thread-safe.
+    // But let's just delegate.
+    return route_pool_.GetBestRoutes(n);
 }

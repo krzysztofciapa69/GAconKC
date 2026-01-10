@@ -14,19 +14,19 @@ void Mutator::Initialize(ThreadSafeEvaluator *eval, const ProblemGeometry *geo,
   geometry_ = geo;
   split_ptr_ = split;
 
-  int num_clients = eval->GetSolutionSize(); // Zakładam, że to liczba genów
+  int num_clients = eval->GetSolutionSize();
   int num_groups = eval->GetNumGroups();
 
   // Rezerwacja pamięci "raz na zawsze"
   removed_indices_buffer_.reserve(num_clients);
-  is_removed_buffer_.resize(num_clients, false); // resize, bo używamy indeksów
-  group_centroids_buffer_.resize(num_groups);
+  is_removed_buffer_.resize(num_clients, false);
+  group_votes_buffer_.resize(num_groups, 0);
   candidates_buffer_.reserve(20);
 }
 
 bool Mutator::ApplyRuinRecreate(Individual &indiv, double intensity,
                                 bool is_exploitation, std::mt19937 &rng) {
-  if (!geometry_ || !geometry_->HasCoordinates())
+  if (!geometry_ || !geometry_->HasNeighbors())
     return false;
 
   std::vector<int> &genes = indiv.AccessGenotype();
@@ -41,7 +41,8 @@ bool Mutator::ApplyRuinRecreate(Individual &indiv, double intensity,
   double pct;
   if (is_exploitation) {
     // exploitation: smaller windows (10-25%)
-    pct = Config::RUIN_BASE_PCT_EXPLOITATION + (Config::RUIN_INTENSITY_SCALE_EXPLOITATION * intensity);
+    pct = Config::RUIN_BASE_PCT_EXPLOITATION +
+          (Config::RUIN_INTENSITY_SCALE_EXPLOITATION * intensity);
   } else {
     // exploration: larger windows (30-70%)
     pct = Config::RUIN_BASE_PCT + (Config::RUIN_INTENSITY_SCALE * intensity);
@@ -65,20 +66,15 @@ bool Mutator::ApplyRuinRecreate(Individual &indiv, double intensity,
   if (num_removed < 1)
     return false;
 
-  // --- DALEJ BEZ ZMIAN (Twoja świetna logika na buforach) ---
+  // Build list of removed clients
   removed_indices_buffer_.clear();
   removed_indices_buffer_.push_back(center_idx);
 
-  for (int i = 0; i < num_removed; ++i) {
+  for (int i = 0; i < num_removed && i < available_neighbors; ++i) {
     removed_indices_buffer_.push_back(neighbors[i]);
   }
 
-  // Reset buforów
-  for (auto &info : group_centroids_buffer_) {
-    info.sum_x = 0;
-    info.sum_y = 0;
-    info.count = 0;
-  }
+  // Reset is_removed buffer
   std::fill(is_removed_buffer_.begin(), is_removed_buffer_.end(), false);
 
   for (int idx : removed_indices_buffer_) {
@@ -86,67 +82,53 @@ bool Mutator::ApplyRuinRecreate(Individual &indiv, double intensity,
       is_removed_buffer_[idx] = true;
   }
 
-  // Centroidy dla ISTNIEJĄCYCH
-  for (int i = 0; i < num_clients; ++i) {
-    if (is_removed_buffer_[i])
-      continue;
-    int g = genes[i];
-    if (g >= 0 && g < num_groups) {
-      int coord_idx = i + 1;
-      const auto &coord = geometry_->GetCoordinate(coord_idx);
-      group_centroids_buffer_[g].sum_x += coord.x;
-      group_centroids_buffer_[g].sum_y += coord.y;
-      group_centroids_buffer_[g].count++;
-    }
-  }
-
-  // Usuwanie
+  // Mark removed clients in genotype
   for (int idx : removed_indices_buffer_)
     genes[idx] = -1;
 
   std::shuffle(removed_indices_buffer_.begin(), removed_indices_buffer_.end(),
                rng);
 
-  // Wstawianie (Greedy Spatial)
+  // Wstawianie using neighbor voting (instead of centroids)
   for (int client_idx : removed_indices_buffer_) {
-    int coord_idx = client_idx + 1;
-    const auto &client_coord = geometry_->GetCoordinate(coord_idx);
+    // Reset votes
+    std::fill(group_votes_buffer_.begin(), group_votes_buffer_.end(), 0);
 
-    int best_g = -1;
-    double best_dist_sq = std::numeric_limits<double>::max();
+    // Get client's neighbors and count votes for each group
+    const auto &client_neighbors = geometry_->GetNeighbors(client_idx);
 
-    for (int g = 0; g < num_groups; ++g) {
-      double dist_sq = 1e15;
-      if (group_centroids_buffer_[g].count > 0) {
-        double gx =
-            group_centroids_buffer_[g].sum_x / group_centroids_buffer_[g].count;
-        double gy =
-            group_centroids_buffer_[g].sum_y / group_centroids_buffer_[g].count;
-        double dx = client_coord.x - gx;
-        double dy = client_coord.y - gy;
-        dist_sq = dx * dx + dy * dy;
-      } else {
-        dist_sq = 1e9; // Puste grupy jako alternatywa
+    for (int neighbor : client_neighbors) {
+      if (neighbor >= num_clients)
+        continue;
+      if (is_removed_buffer_[neighbor])
+        continue; // skip removed neighbors
+      int neighbor_group = genes[neighbor];
+      if (neighbor_group >= 0 && neighbor_group < num_groups) {
+        group_votes_buffer_[neighbor_group]++;
       }
+    }
 
-      if (dist_sq < best_dist_sq) {
-        best_dist_sq = dist_sq;
+    // Find group with most neighbor votes
+    int best_g = -1;
+    int max_votes = 0;
+    for (int g = 0; g < num_groups; ++g) {
+      if (group_votes_buffer_[g] > max_votes) {
+        max_votes = group_votes_buffer_[g];
         best_g = g;
       }
     }
-    if (best_g == -1)
-      best_g = rng() % num_groups;
+
+    if (best_g == -1) {
+      best_g = rng() % num_groups; // fallback to random
+    }
 
     genes[client_idx] = best_g;
-
-    // Update centroidu "on the fly" (ważne!)
-    group_centroids_buffer_[best_g].sum_x += client_coord.x;
-    group_centroids_buffer_[best_g].sum_y += client_coord.y;
-    group_centroids_buffer_[best_g].count++;
+    is_removed_buffer_[client_idx] = false; // mark as placed
   }
 
   return true;
 }
+
 bool Mutator::ApplySmartSpatialMove(Individual &indiv, std::mt19937 &rng) {
   if (!geometry_)
     return false;

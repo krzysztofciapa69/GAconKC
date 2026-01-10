@@ -1,47 +1,34 @@
 #pragma once
+#include "Constants.hpp"
 #include "ProblemData.hpp"
 #include "ThreadSafeEvaluator.hpp"
-#include "Constants.hpp"
-#include <vector>
 #include <random>
+#include <vector>
+
 
 namespace LcVRPContest {
 
-    class ProblemGeometry {
-    public:
-        ProblemGeometry(const ProblemData& data, int id);
+class ProblemGeometry {
+public:
+  ProblemGeometry(const ProblemData &data, int id);
 
+  void Initialize(ThreadSafeEvaluator *evaluator);
 
-        void Initialize(ThreadSafeEvaluator* evaluator);
+  inline const std::vector<int> &GetNeighbors(int index) const {
+    static const std::vector<int> empty;
+    if (index < 0 || index >= (int)neighbors_.size())
+      return empty;
+    return neighbors_[index];
+  }
 
+  bool HasNeighbors() const { return !neighbors_.empty(); }
 
-        inline const Coordinate& GetCoordinate(int index) const {
-            if (index < 0 || index >= (int)coordinates_.size()) return coordinates_[0];
-            return coordinates_[index];
-        }
+private:
+  int id_;
+  std::mt19937 rng_;
 
-        inline const std::vector<int>& GetNeighbors(int index) const {
-            static const std::vector<int> empty;
-            if (index < 0 || index >= (int)neighbors_.size()) return empty;
-            return neighbors_[index];
-        }
+  std::vector<std::vector<int>> neighbors_;
 
-        bool HasCoordinates() const { return !coordinates_.empty(); }
-        
-        // Create permutation sorted by angle from depot (for Angular Sweep initialization)
-        std::vector<int> CreateAngularPermutation(double offset_radians = 0.0) const;
-
-    private:
-        int id_;
-        std::mt19937 rng_; 
-
-        std::vector<Coordinate> coordinates_;
-        std::vector<Coordinate> artificial_coordinates_;
-        std::vector<std::vector<int>> neighbors_;
-
-        bool HasValidCoordinates(const std::vector<Coordinate>& coords) const;
-        void GenerateArtificialCoordinates(ThreadSafeEvaluator* evaluator);
-        double CalculateStress(ThreadSafeEvaluator* evaluator, const std::vector<Coordinate>& test_coords);
-        void PrecomputeNeighbors(ThreadSafeEvaluator* evaluator);
-    };
-}
+  void PrecomputeNeighbors(ThreadSafeEvaluator *evaluator);
+};
+} // namespace LcVRPContest
