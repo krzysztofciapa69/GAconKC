@@ -31,8 +31,8 @@ Optimizer::Optimizer(Evaluator &evaluator)
     // Population size based on island type AND instance size
     int pop_size;
     if (num_customers > Config::HUGE_INSTANCE_THRESHOLD) {
-      // n > 3000: minimal populations for fast iteration
-      pop_size = (i % 2 == 0) ? 15 : 10;
+      // n > 3000: larger populations for diversity (was 15/10)
+      pop_size = (i % 2 == 0) ? 30 : 20;
     } else if (num_customers > Config::LARGE_INSTANCE_THRESHOLD) {
       // n > 1500: reduced populations
       pop_size = (i % 2 == 0) ? Config::EXPLORATION_POP_LARGE 
@@ -99,6 +99,16 @@ void Optimizer::Initialize() {
     islands_[i]->SetRingPredecessor(islands_[pred]);
   }
 
+  // Set up exploit_siblings: EXPLOIT islands (1, 3, 5) broadcast best to each other
+  // EXPLORE islands broadcast to DEDICATED EXPLOIT partner only (prevents homogenization)
+  islands_[1]->SetExploitSiblings({islands_[3], islands_[5]});  // I1 → I3, I5
+  islands_[3]->SetExploitSiblings({islands_[1], islands_[5]});  // I3 → I1, I5
+  islands_[5]->SetExploitSiblings({islands_[1], islands_[3]});  // I5 → I1, I3
+  // DEDICATED PAIRS: Each EXPLORE broadcasts only to its paired EXPLOIT
+  islands_[0]->SetExploitSiblings({islands_[1]});  // I0 → I1 only
+  islands_[2]->SetExploitSiblings({islands_[3]});  // I2 → I3 only
+  islands_[4]->SetExploitSiblings({islands_[5]});  // I4 → I5 only
+
   // Start 6 worker threads (1 per island)
   for (int i = 0; i < 6; ++i) {
     worker_threads_.emplace_back(&Optimizer::IslandWorkerLoop, this, i);
@@ -107,6 +117,8 @@ void Optimizer::Initialize() {
   cout << "[OPT] Started 6 island workers in RING topology "
           "(0->1->2->3->4->5->0)\n";
   cout << "[OPT] Even (0,2,4) = EXPLORATION | Odd (1,3,5) = EXPLOITATION\n";
+  cout << "[OPT] EXPLOIT islands broadcast best to siblings (non-native)\n";
+  cout << "[OPT] Specialization: I1=Ejection, I3=PathRelink, I5=DeepSwap\n";
   cout << "[OPT] Migration: ASYNC pull-based (islands pull when stuck)\n";
 }
 

@@ -44,6 +44,10 @@ public:
   // them
   bool ApplyReturnMinimizer(Individual &indiv, std::mt19937 &rng);
 
+  // Split Overloaded Routes - detects routes with >100% load and splits them
+  // into multiple vehicles to eliminate returns
+  bool ApplySplitOverloadedRoutes(Individual &indiv, std::mt19937 &rng);
+
   // Merge-Split - combines two groups into one, then re-splits optimally
   // Powerful operator for escaping local optima by restructuring route
   // boundaries

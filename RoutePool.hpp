@@ -1,115 +1,74 @@
 #pragma once
-
 #include "Individual.hpp"
 #include "Split.hpp"
 #include "ThreadSafeEvaluator.hpp"
 
-#include <algorithm>
-#include <memory>
+#include <cstdint>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
 
 namespace LcVRPContest {
 
-// trie node for exact route deduplication
-struct TrieNode {
-    bool is_end_of_route = false;
-    std::vector<std::pair<int, std::unique_ptr<TrieNode>>> children;
-
-    TrieNode* FindChild(int id) {
-        for (auto& p : children) {
-            if (p.first == id) return p.second.get();
-        }
-        return nullptr;
-    }
-
-    TrieNode* GetOrAddChild(int id) {
-        for (auto& p : children) {
-            if (p.first == id) return p.second.get();
-        }
-        children.emplace_back(id, std::make_unique<TrieNode>());
-        return children.back().second.get();
-    }
-};
-
-class RouteTrie {
-public:
-    RouteTrie() : root_(std::make_unique<TrieNode>()) {}
-
-    // returns true if route was new and inserted, false if already existed
-    bool Insert(const std::vector<int>& sorted_route) {
-        TrieNode* curr = root_.get();
-        for (int id : sorted_route) {
-            curr = curr->GetOrAddChild(id);
-        }
-        if (curr->is_end_of_route) return false;
-        curr->is_end_of_route = true;
-        return true;
-    }
-
-    void Clear() { root_ = std::make_unique<TrieNode>(); }
-
-private:
-    std::unique_ptr<TrieNode> root_;
-};
-
-// cached route structure for long-term memory
+// Cached route structure for efficient beam search
 struct CachedRoute {
-    std::vector<int> nodes;            // customer IDs in route
-    double cost;                        // total route cost
-    double efficiency;                  // quality score for sorting
-    std::vector<uint64_t> bitmask;     // for fast overlap check
+    std::vector<int> nodes;          // customer IDs in visit order
+    double cost = 0.0;               // total route distance
+    double efficiency = 0.0;         // efficiency score (lower = better)
+    uint64_t hash = 0;               // hash for O(1) deduplication
+    std::vector<uint64_t> bitmask;   // customer coverage bitmask
 
+    // Comparison operator for sorting (by efficiency)
     bool operator<(const CachedRoute& other) const {
         return efficiency < other.efficiency;
     }
 };
 
-// thread-safe route pool for long-term memory (per-island)
+// RoutePool: stores high-quality route segments for Frankenstein (beam search) construction
 class RoutePool {
 public:
-    RoutePool() = default;
-
-    // non-copyable and non-movable
-    RoutePool(const RoutePool&) = delete;
-    RoutePool& operator=(const RoutePool&) = delete;
-    RoutePool(RoutePool&&) = delete;
-    RoutePool& operator=(RoutePool&&) = delete;
-
-    // add routes extracted from a solution
+    // Add routes from a complete solution
     void AddRoutesFromSolution(const std::vector<int>& solution,
                                const ThreadSafeEvaluator& evaluator);
 
-    // beam search: assemble best non-overlapping routes into Individual
-    Individual SolveBeamSearch(ThreadSafeEvaluator* evaluator, Split& split,
-                               int beam_width = 50);
+    // Build new individual using beam search from cached routes
+    Individual SolveBeamSearch(ThreadSafeEvaluator* evaluator,
+                               Split& split, int beam_width);
 
-    // route migration between islands
-    std::vector<CachedRoute> GetBestRoutes(int n) const;
+    // Import routes from another pool (for inter-island migration)
     void ImportRoutes(const std::vector<CachedRoute>& imported_routes);
 
-    // clear the pool
-    void Clear();
+    // Get best n routes (for migration export)
+    std::vector<CachedRoute> GetBestRoutes(int n) const;
 
-    // get current pool size
+    // Pool management
+    void Clear();
     size_t GetSize() const;
 
-    // get number of routes added since last clear
-    size_t GetTotalRoutesAdded() const { return total_routes_added_; }
+    // Check if new routes were added since last snapshot
+    bool HasNewRoutesSince(size_t snapshot) const {
+        return total_routes_added_ > snapshot;
+    }
 
-    // check if new routes were added since a snapshot
-    bool HasNewRoutesSince(size_t snapshot) const { 
-        return total_routes_added_ > snapshot; 
+    // Get total routes added (for snapshot comparison)
+    size_t GetTotalRoutesAdded() const {
+        return total_routes_added_;
     }
 
 private:
+    // Calculate cost for a single route
     double CalculateRouteCost(const std::vector<int>& route,
                               const ThreadSafeEvaluator& evaluator) const;
+
+    // Hash a sorted route for O(1) deduplication
+    uint64_t HashRoute(const std::vector<int>& sorted_route) const;
+
+    // Evict worst routes when pool is full
     void EvictWorstRoutes();
 
-    mutable std::mutex mutex_;
     std::vector<CachedRoute> routes_;
-    RouteTrie trie_;
+    std::unordered_set<uint64_t> route_hashes_;  // O(1) deduplication
+    mutable std::mutex mutex_;
     size_t total_routes_added_ = 0;
 };
 

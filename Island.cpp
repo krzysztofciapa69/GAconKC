@@ -105,9 +105,11 @@ double Island::SafeEvaluate(const std::vector<int> &genotype) {
 
   if (local_cache_.TryGet(genotype, distance, returns)) {
     cache_hits_++;
+    TrackCacheResult(true);  // rolling window tracking
     return distance;
   }
   cache_misses_++;
+  TrackCacheResult(false);  // rolling window tracking
   EvaluationResult result = evaluator_->EvaluateWithStats(genotype);
 
   distance = result.fitness;
@@ -129,11 +131,13 @@ double Island::SafeEvaluate(Individual &indiv) {
   int returns = 0;
   if (local_cache_.TryGet(indiv.AccessGenotype(), distance, returns)) {
     cache_hits_++;
+    TrackCacheResult(true);  // rolling window tracking
     indiv.SetReturnCount(returns);
     indiv.SetFitness(distance); // raw fitness
     return distance;
   }
   cache_misses_++;
+  TrackCacheResult(false);  // rolling window tracking;
 
   EvaluationResult result = evaluator_->EvaluateWithStats(indiv.GetGenotype());
 
@@ -150,6 +154,7 @@ double Island::SafeEvaluate(Individual &indiv) {
   local_cache_.Insert(indiv.AccessGenotype(), distance, returns);
 
   return distance;
+
 }
 
 void Island::InitIndividual(Individual &indiv, INITIALIZATION_TYPE strategy) {
@@ -319,20 +324,11 @@ void Island::Initialize(INITIALIZATION_TYPE strategy) {
 
   UpdateBiasedFitness();
 
-  /*
-  std::vector<int> test = { 5,16,2,12,10,20,15,11,11,11,13,8,14,7,6,11,20,1,5,11,14,0,8,1,9,0,4,7,17,1,13,2,3,14,14,17,9,11,10,3,6,18,5,16,17,13,10,3,3,8,18,20,1,18,14,20,9,4,3,6,4,12,13,5,3,0,18,19,15,8,14,20,18,7,11,1,5,8,19,9,
-8,6,6,12,20,7,8,19,4,4,13,6,20,19,5,0,18,5,0,5,18,17,0,0,9,15,10,20,13,1,7,6,16,12,2,4,17,15,3,3,0,1,9,12,1,8,0,15,5,12,2,6,0,7,4,1,14,7,0,14,10,4,19,17,3,19,16,1,15,18,6,8,12,18,9,10,6,2,10,1,4,13,3,7,16,20,6,7,16,14,12,19,0,13,
-19,20,11,9,9,3,6,1,15,16,15,9,7,18,4,3,18,8,11,3,9,10,7,12,12,11,6,18,16,4,12,13,19,15,9,19,16,14,5,10,14,9,6,10,2,5,9,12,19,17,17,14,19,17,15,15,9,8,7,20,20,2,5,13,8,6,11,14,15,19,8,16,11,2,1,11,13,16,19,8,18,15,16,19,12,0,2,4,17,7,18,14,0,
-17,9,12,4,10,10,10,3,20,9,8,2,14,3,10,6,8,2,6,18,5,11,19,0,20,13,10,10,14,4,20,1,2,17,16,0,1,12,18,3,2,20,15,13,12,15,9,13,17,4,1,1,8,2,11 };
-  Individual testInd(test);
-  cout << "WYNIK TEST: \n";
-  cout << SafeEvaluate(testInd);
-  cout<<"po vnd: :";
-  local_search_.RunVND(testInd);
-  cout << SafeEvaluate(testInd) << "\n";*/
 }
 
 void Island::RunGeneration() {
+  ProcessBroadcastBuffer(); // Process any pending broadcasts first
+
   current_generation_++;
 
   if (ShouldTrackDiversity()) {
@@ -416,22 +412,42 @@ void Island::RunGeneration() {
     // Crossover success rates
     double srex_rate = (diag_srex_calls_ > 0) ? (100.0 * diag_srex_wins_ / diag_srex_calls_) : 0.0;
     double neighbor_rate = (diag_neighbor_calls_ > 0) ? (100.0 * diag_neighbor_wins_ / diag_neighbor_calls_) : 0.0;
+    double pr_rate = (diag_pr_calls_ > 0) ? (100.0 * diag_pr_wins_ / diag_pr_calls_) : 0.0;
 
-    std::cout << " [DIAG I" << id_ << " " << (IsExploration() ? "EXP" : "EXT")
-              << "] "
-              << "VND: " << diag_vnd_improvements_ << "/" << diag_vnd_calls_
-              << " (" << std::fixed << std::setprecision(0) << vnd_success_rate
-              << "%) | "
-              << "XO: SREX " << diag_srex_wins_ << "/" << diag_srex_calls_ << "(" << std::setprecision(0) << srex_rate << "%) "
-              << "NBR " << diag_neighbor_wins_ << "/" << diag_neighbor_calls_ << "(" << std::setprecision(0) << neighbor_rate << "%) | "
-              << "Uniq: " << unique_count << "/" << population_size_ << " ("
-              << std::setprecision(0) << unique_pct << "%) | "
-              << "Gap: " << std::setprecision(0) << gap_to_best << " | "
-              << "Stag: " << gens_since_improve << "g ";
-    if (!issues.empty()) {
-      std::cout << "\033[31m" << issues << "\033[0m";
+    // Construct diagnostic log line atomically
+    std::ostringstream oss;
+    oss << " [DIAG I" << id_ << " " << (IsExploration() ? "EXP" : "EXT")
+        << "] "
+        << "VND: " << diag_vnd_improvements_ << "/" << diag_vnd_calls_
+        << " (" << std::fixed << std::setprecision(0) << vnd_success_rate
+        << "%) | ";
+
+    // Show relevant crossover stats per island type
+    if (IsExploration()) {
+      oss << "XO: SREX " << diag_srex_wins_ << "/" << diag_srex_calls_ << "(" << srex_rate << "%) "
+          << "NBR " << diag_neighbor_wins_ << "/" << diag_neighbor_calls_ << "(" << neighbor_rate << "%) | ";
+    } else {
+      // EXPLOIT: show PR crossover + epsilon-greedy VND operator success rates
+      oss << "XO:PR " << diag_pr_wins_ << "/" << diag_pr_calls_ << "(" << pr_rate << "%) "
+          << "| EpsG: S2=" << std::setprecision(0) << (adapt_swap_.success_rate * 100) << "% "
+          << "Ej=" << (adapt_ejection_.success_rate * 100) << "% "
+          << "S3=" << (adapt_swap3_.success_rate * 100) << "% "
+          << "S4=" << (adapt_swap4_.success_rate * 100) << "% | ";
     }
-    std::cout << "\n";
+
+    oss << "Uniq: " << unique_count << "/" << population_size_ << " ("
+        << std::setprecision(0) << unique_pct << "%) | "
+        << "Div: " << std::fixed << std::setprecision(3) << current_structural_diversity_ << " | "
+        << "Gap: " << std::setprecision(0) << gap_to_best << " | "
+        << "Stag: " << gens_since_improve << "g ";
+
+    if (!issues.empty()) {
+      oss << "\033[31m" << issues << "\033[0m";
+    }
+    oss << "\n";
+
+    // Atomic write to stdout
+    std::cout << oss.str();
 
     // Reset counters
     diag_vnd_calls_ = diag_vnd_improvements_ = 0;
@@ -439,6 +455,29 @@ void Island::RunGeneration() {
     diag_crossovers_ = diag_offspring_better_ = diag_offspring_total_ = 0;
     diag_srex_calls_ = diag_srex_wins_ = 0;
     diag_neighbor_calls_ = diag_neighbor_wins_ = 0;
+    diag_pr_calls_ = diag_pr_wins_ = 0;
+    
+    // Update adaptive probabilities for next window (EXPLOIT only)
+    if (IsExploitation()) {
+      UpdateAdaptiveProbabilities();
+    }
+    
+    // === CONVERGENCE DETECTION VIA CACHE HIT RATE ===
+    // Check rolling window cache hit rate every diagnostic interval
+    double recent_hit_rate = GetRecentCacheHitRate();
+    if (cache_result_window_.size() >= CACHE_WINDOW_SIZE / 2) {  // Need at least half window
+      if (recent_hit_rate > 0.95 && !convergence_alarm_active_) {
+        OnConvergenceCritical();
+      } else if (recent_hit_rate > 0.90 && !convergence_alarm_active_) {
+        OnConvergenceAlarm();
+      } else if (recent_hit_rate > 0.85 && convergence_mutation_boost_ < 2.0) {
+        OnConvergenceWarning();
+      } else if (recent_hit_rate < 0.70) {
+        // Reset mutation boost when cache hit rate is healthy
+        convergence_mutation_boost_ = 1.0;
+        convergence_alarm_active_ = false;
+      }
+    }
   }
 
   // ASYNCHRONOUS MIGRATION: Try to pull migrant from predecessor when stuck
@@ -460,42 +499,168 @@ void Island::RunGeneration() {
   bool is_endgame =
       (elapsed > Config::MAX_TIME_SECONDS * Config::ENDGAME_THRESHOLD);
 
-  std::uniform_real_distribution<double> d(0.0, 1.0);
+    // Unified Operator Selection (Roulette Wheel) for Exploitation
+    // OR Standard Crossover/Mutation for Exploration
+    
+    // Probabilities (Exploitation vs Exploration)
+    
+    std::uniform_real_distribution<double> d(0.0, 1.0); // Restored 'd'
+    std::uniform_real_distribution<double> dist_op(0.0, 1.0);
 
-  for (int i = 0; i < lambda; ++i) {
-    Individual child(evaluator_->GetSolutionSize());
-    int p1 = SelectParentIndex();
-    int p2 = SelectParentIndex();
+    for (int i = 0; i < lambda; ++i) {
+        Individual child(evaluator_->GetSolutionSize());
+        int p1 = -1, p2 = -1;
+        double op_val = dist_op(rng_);
 
-    // Track crossover type: 0=none, 1=SREX, 2=Neighbor
-    int crossover_type = 0;
-    double parent1_fit = 0, parent2_fit = 0;
+        bool mutated = false;
+        bool strong_mutation = false;
+        int op_type = 0; // 0=None, 1=SREX, 2=Neighbor, 3=PR, 4=Mutation(RR/Split)
+        int crossover_type = 0;
+        double parent1_fit = 0.0;
+        double parent2_fit = 0.0;
+        bool operator_selected = false;  // Flag to skip normal operator selection
 
-    if (p1 >= 0 && p2 >= 0) {
-      parent1_fit = population_[p1].GetFitness();
-      parent2_fit = population_[p2].GetFitness();
-      
-      if (is_endgame) {
-        child = CrossoverNeighborBased(population_[p1], population_[p2]);
-        crossover_type = 2; // Neighbor
-      } else {
-        // Determine which crossover will be used (replicated logic from Crossover)
-        std::uniform_real_distribution<double> dist_xo(0.0, 1.0);
-        double r = dist_xo(rng_);
-        double sequence_prob = (id_ <= 1) ? 0.31 : ((id_ <= 3) ? 0.4 : 0.6);
-        crossover_type = (r < sequence_prob) ? 1 : 2; // 1=SREX, 2=Neighbor
-        child = Crossover(population_[p1], population_[p2]);
-      }
+    if (IsExploitation()) {
+       // === EXPLOIT STAGNATION RESCUE: Heavy R&R injection ===
+       // When stuck for 500+ gens, periodically inject heavily perturbed solution
+       long long time_since_improve = current_generation_ - last_improvement_gen_;
+       if (time_since_improve > Config::EXPLOIT_RR_STAGNATION_TRIGGER &&
+           i == 0 && current_generation_ % Config::EXPLOIT_RR_INTERVAL == 0) {
+         // Pick random individual and apply heavy R&R (40% destruction)
+         int victim = rng_() % population_.size();
+         child = population_[victim];
+         mutator_.ApplyRuinRecreate(child, Config::EXPLOIT_HEAVY_RR_INTENSITY, true, rng_);
+         mutated = true;
+         strong_mutation = true;
+         op_type = 4;  // R&R mutation
+         operator_selected = true;  // Skip normal operator selection
+       }
+       
+       if (!operator_selected) {
+       // === EXPLOITATION: UNIFIED OPERATOR SELECTION (Roulette Wheel) ===
+       double pr_prob = 0.60;
+       double rr_prob = 0.20;
+       double split_prob = 0.20;
+       
+       // Load config based on ID
+       if (id_ == 1) {
+           pr_prob = Config::EXPLOIT_I1_OP_PR_PROB;
+           rr_prob = Config::EXPLOIT_I1_OP_RR_PROB;
+           split_prob = Config::EXPLOIT_I1_OP_SPLIT_PROB;
+       } else if (id_ == 3) {
+           pr_prob = Config::EXPLOIT_I3_OP_PR_PROB;
+           rr_prob = Config::EXPLOIT_I3_OP_RR_PROB;
+           split_prob = Config::EXPLOIT_I3_OP_SPLIT_PROB;
+       } else if (id_ == 5) {
+           pr_prob = Config::EXPLOIT_I5_OP_PR_PROB;
+           rr_prob = Config::EXPLOIT_I5_OP_RR_PROB;
+       } 
+
+       // HUGE instances (n > 3000): Very limited PR for quality boost
+       // PR is O(N²) - keep it rare to avoid stalling
+       if (evaluator_->GetSolutionSize() > Config::HUGE_INSTANCE_THRESHOLD) {
+           pr_prob = 0.01;    // 1% PR only (was 15%)
+           rr_prob = 0.89;    // R&R dominates for speed
+           split_prob = 0.10; // Keep structural changes
+       }
+
+       // Normalize if needed, but assuming sum=1.0 from Constants
+       
+       if (op_val < pr_prob) {
+           // === OPERATOR 1: PATH RELINKING (CROSSOVER) ===
+           // Requires 2 parents
+           int candidates[4];
+           for (int c = 0; c < 4; ++c) candidates[c] = SelectParentIndex();
+           
+           int best_c1 = 0, best_c2 = 1;
+           int max_dist = -1;
+           int num_groups = evaluator_->GetNumGroups();
+
+           for (int c1 = 0; c1 < 4; ++c1) {
+             for (int c2 = c1 + 1; c2 < 4; ++c2) {
+               int d = CalculateBrokenPairsDistance(population_[candidates[c1]], 
+                                                    population_[candidates[c2]], 
+                                                    evaluator_->GetProblemData().GetPermutation(), 
+                                                    num_groups);
+               if (d > max_dist) {
+                 max_dist = d;
+                 best_c1 = candidates[c1];
+                 best_c2 = candidates[c2];
+               }
+             }
+           }
+           p1 = best_c1; 
+           p2 = best_c2;
+           parent1_fit = population_[p1].GetFitness();
+           parent2_fit = population_[p2].GetFitness();
+           
+           if (parent1_fit < parent2_fit) {
+              child = population_[p1];
+              double cost = child.GetFitness();
+              local_search_.TryPathRelinking(child.AccessGenotype(), cost, population_[p2].GetGenotype());
+              child.SetFitness(cost);
+           } else {
+              child = population_[p2];
+              double cost = child.GetFitness();
+              local_search_.TryPathRelinking(child.AccessGenotype(), cost, population_[p1].GetGenotype());
+              child.SetFitness(cost);
+           }
+           op_type = 3; // PR
+           crossover_type = 3;
+           
+       } else if (op_val < pr_prob + rr_prob) {
+           // === OPERATOR 2: RUIN & RECREATE (MUTATION) ===
+           p1 = SelectParentIndex();
+           child = population_[p1];
+           // Intensity 0.0 -> uses Base Exploitation Pct (10-25%)
+           mutator_.ApplyRuinRecreate(child, 0.0, true, rng_);
+           mutated = true;
+           op_type = 4;
+       } else {
+           // === OPERATOR 3: MICROSPLIT (MUTATION) ===
+           p1 = SelectParentIndex();
+           child = population_[p1];
+           // Level 2 = Small windows
+           mutator_.ApplyMicroSplitMutation(child, 0.0, 2, rng_);
+           mutated = true;
+           op_type = 4;
+       }
+       }  // end if (!operator_selected)
+       
     } else {
-      InitIndividual(child, INITIALIZATION_TYPE::RANDOM);
+      // === EXPLORATION: STANDARD CROSSOVER/MUTATION ===
+      double p_crossover = 0.60;
+      
+      // Standard tournament selection
+      p1 = SelectParentIndex();
+      p2 = SelectParentIndex();
+
+      if (p1 >= 0 && p2 >= 0 && op_val < p_crossover) {
+        // === CROSSOVER BRANCH ===
+        parent1_fit = population_[p1].GetFitness();
+        parent2_fit = population_[p2].GetFitness();
+        
+        if (is_endgame) {
+          child = CrossoverNeighborBased(population_[p1], population_[p2]);
+          crossover_type = 2; // Neighbor
+        } else {
+           // EXPLORE: SREX or Neighbor
+           double seq_prob = (id_ <= 1) ? 0.31 : 0.5;
+           crossover_type = (dist_op(rng_) < seq_prob) ? 1 : 2; 
+           child = Crossover(population_[p1], population_[p2]);
+        }
+      } else {
+        // === MUTATION BRANCH ===
+        if (p1 >= 0) child = population_[p1];
+        else InitIndividual(child, INITIALIZATION_TYPE::RANDOM);
+        
+        int m_res = ApplyMutation(child, is_endgame);
+        mutated = (m_res > 0);
+        strong_mutation = (m_res == 2);
+      }
     }
 
-    // Unified Mutation Call
-    int mutation_result = ApplyMutation(child, is_endgame);
-    bool mutated = (mutation_result > 0);
-    bool strong_mutation = (mutation_result == 2);
-
-    // Diagnostic tracking
+    // Diagnostic tracking (removed goto label)
     if (mutated)
       diag_mutations_++;
     if (strong_mutation)
@@ -522,13 +687,14 @@ void Island::RunGeneration() {
 
     // Track crossover success: child better than BOTH parents (before mutation/VND)
     if (crossover_type > 0 && parent1_fit > 0 && parent2_fit > 0) {
-      double worse_parent = std::max(parent1_fit, parent2_fit);
       if (fit < parent1_fit && fit < parent2_fit) {
         if (crossover_type == 1) diag_srex_wins_++;
-        else diag_neighbor_wins_++;
+        else if (crossover_type == 2) diag_neighbor_wins_++;
+        else if (crossover_type == 3) diag_pr_wins_++;
       }
       if (crossover_type == 1) diag_srex_calls_++;
-      else diag_neighbor_calls_++;
+      else if (crossover_type == 2) diag_neighbor_calls_++;
+      else if (crossover_type == 3) diag_pr_calls_++;
     }
 
     bool promising = (fit < fitness_threshold);
@@ -547,8 +713,9 @@ void Island::RunGeneration() {
         IsExploration() &&
         (promising || (d(rng_) < Config::EXPLORATION_VND_EXTRA_PROB));
     
-    // Skip VND entirely for exploration on huge instances
-    if (problem_size > Config::HUGE_INSTANCE_THRESHOLD && IsExploration()) {
+    // Skip VND entirely for exploration on large instances
+    // Exploration relies on mutation diversity, not local search refinement
+    if (problem_size > Config::LARGE_INSTANCE_THRESHOLD && IsExploration()) {
       exploration_vnd = false;
     }
     
@@ -565,26 +732,83 @@ void Island::RunGeneration() {
       }
       bool allow_swap = IsExploitation() && Config::ALLOW_SWAP;
       
-      // Disable expensive operators for large instances (reuse problem_size from above)
-      bool allow_3swap = IsExploitation() && Config::ALLOW_3SWAP && 
-                         !strong_mutation && (problem_size < Config::LARGE_INSTANCE_THRESHOLD);
-      bool allow_ejection = IsExploitation() && Config::ALLOW_EJECTION && 
-                            (problem_size < Config::LARGE_INSTANCE_THRESHOLD);
-
-      // Set guide solution for Path Relinking ONLY for exploitation islands
-      // Explorers skip PR entirely (too slow for their purpose)
-      // Also skip for large instances (n >= 1500)
-      if (IsExploitation() && problem_size < Config::LARGE_INSTANCE_THRESHOLD) {
-        std::lock_guard<std::mutex> lock(best_mutex_);
-        local_search_.SetGuideSolution(current_best_.GetGenotype());
-      } else {
-        local_search_.SetGuideSolution({}); // Empty guide = no PR
+      // === EPSILON-GREEDY ADAPTIVE OPERATOR SELECTION ===
+      // Select exactly ONE operator: 0=Swap, 1=Ejection, 2=3-Swap, 3=4-Swap
+      bool allow_3swap = false;
+      bool allow_ejection = false;
+      bool allow_4swap = false;
+      int selected_op = -1;  // Track which operator was selected for credit
+      
+      if (IsExploitation() && problem_size < Config::LARGE_INSTANCE_THRESHOLD && !strong_mutation) {
+        // Select ONE operator using epsilon-greedy
+        selected_op = SelectAdaptiveOperator();  // 0=Swap, 1=Ejection, 2=3-Swap, 3=4-Swap
+        
+        // Reset allow_swap to false, will enable only if selected
+        allow_swap = false;
+        
+        // === COMBO OPERATOR SELECTION ===
+        // Instead of selecting ONE operator, we enable the selected one PLUS neighbors
+        // This allows broader exploration while still using adaptive learning
+        switch (selected_op) {
+          case 0:  // Swap selected: enable Swap + Ejection
+            allow_swap = true;
+            allow_ejection = true;
+            adapt_swap_.calls++;
+            break;
+          case 1:  // Ejection selected: enable Ejection + 3-Swap
+            allow_ejection = true;
+            allow_3swap = true;
+            adapt_ejection_.calls++;
+            break;
+          case 2:  // 3-Swap selected: enable 3-Swap + Ejection + 4-Swap
+            allow_ejection = true;
+            allow_3swap = true;
+            allow_4swap = true;
+            adapt_swap3_.calls++;
+            break;
+          case 3:  // 4-Swap selected: enable 4-Swap + 3-Swap
+            allow_3swap = true;
+            allow_4swap = true;
+            adapt_swap4_.calls++;
+            break;
+        }
+        
+        // No PR in VND - it's already used as crossover (90% in RunGeneration)
+        local_search_.SetGuideSolution({});
+      } else if (IsExploration()) {
+        // Exploration: minimal VND operators
+        allow_swap = false;
+        allow_3swap = false;
+        allow_ejection = false;
+        local_search_.SetGuideSolution({});
       }
 
       diag_vnd_calls_++;
       double fit_before = child.GetFitness();
-      if (local_search_.RunVND(child, vnd_iters, allow_swap, allow_3swap,
-                               allow_ejection)) {
+      
+      // 10% chance for FULL VND (unlocks 3-opt, Ejection, etc.)
+      bool force_full_vnd = (d(rng_) < 0.10);
+      if (force_full_vnd) {
+          allow_swap = true;
+          allow_3swap = true;
+          allow_ejection = true; // Use Ejection if enabled globally
+      }
+
+      // DECOMPOSED VND: Use sector-based decomposition for large instances
+      // exploration_mode=true for exploration islands -> ultra-fast optimization
+      bool vnd_improved = false;
+      if (problem_size > Config::LARGE_INSTANCE_THRESHOLD && !force_full_vnd) {
+        // Use decomposed VND with exploration_mode flag
+        // Exploration: 32 sectors, 1 iter, no boundary = ~20x faster
+        // Exploitation: 16 sectors, full iters, 2 boundary passes = quality
+        vnd_improved = local_search_.RunDecomposedVND(child, vnd_iters, IsExploration());
+      } else {
+        // Standard VND for small instances - full quality
+        vnd_improved = local_search_.RunVND(child, vnd_iters, allow_swap, allow_3swap,
+                                            allow_ejection, allow_4swap);
+      }
+      
+      if (vnd_improved) {
         child.Canonicalize();
         if (!local_cache_.TryGet(child.GetGenotype(), fit, ret)) {
           cache_misses_++;
@@ -598,8 +822,20 @@ void Island::RunGeneration() {
         }
         child.SetFitness(fit);
         child.SetReturnCount(ret);
-        if (fit < fit_before)
+        if (fit < fit_before) {
           diag_vnd_improvements_++;
+          
+          // === ADAPTIVE SUCCESS TRACKING ===
+          // Credit the ONE operator that was selected for this VND run
+          if (IsExploitation() && problem_size < Config::LARGE_INSTANCE_THRESHOLD && selected_op >= 0) {
+            switch (selected_op) {
+              case 0: adapt_swap_.wins++; break;
+              case 1: adapt_ejection_.wins++; break;
+              case 2: adapt_swap3_.wins++; break;
+              case 3: adapt_swap4_.wins++; break;
+            }
+          }
+        }
       }
     }
 
@@ -612,13 +848,65 @@ void Island::RunGeneration() {
 
     // GLS update removed from inner loop to prevent noise
 
+    // Track if we need to broadcast (do it OUTSIDE the lock to prevent deadlock)
+    bool should_broadcast = false;
+    Individual best_to_broadcast;
+    
     {
       std::lock_guard<std::mutex> lock(best_mutex_);
       if (fit < current_best_.GetFitness()) {
+        // Mark as native to this island
+        offspring_pool.back().SetNative(true);
+        offspring_pool.back().SetHomeIsland(id_);
+        
         current_best_ = offspring_pool.back();
         stagnation_count_ = 0;
         last_improvement_gen_ = current_generation_;
         fitness_threshold = fit * 1.05;
+        
+        // Prepare for broadcast (but don't do it while holding lock!)
+        // BOTH EXPLORE and EXPLOIT broadcast new global bests to EXPLOIT siblings
+        // (EXPLORE discoveries are refined by EXPLOIT "chase" mechanisms)
+        if (!exploit_siblings_.empty()) {
+          should_broadcast = true;
+          best_to_broadcast = current_best_;  // Copy for broadcast
+        }
+      }
+    }
+    
+    // === NON-NATIVE BROADCAST (OUTSIDE LOCK) ===
+    // EXPLOIT islands share best with other EXPLOIT islands (after warmup, with filters)
+    // EXPLORE islands IMMEDIATELY share best with ALL EXPLOIT islands (no warmup, no filters!)
+    // This ensures good exploration discoveries are instantly available for exploitation
+    auto now_broadcast = std::chrono::steady_clock::now();
+    double elapsed_broadcast = std::chrono::duration<double>(now_broadcast - start_time_).count();
+    
+    if (should_broadcast) {
+      if (IsExploration()) {
+        // EXPLORE: IMMEDIATE unconditional broadcast to all EXPLOIT siblings
+        // No warmup delay, no filters - EXPLOIT needs fresh exploration material ASAP
+        // Set home_island to THIS island's ID so receiver knows source
+        best_to_broadcast.SetHomeIsland(id_);
+        for (Island* sibling : exploit_siblings_) {
+          if (sibling != nullptr) {
+            sibling->ReceiveBroadcastBest(best_to_broadcast);
+          }
+        }
+        // Log only occasionally to avoid spam
+        if (current_generation_ % 100 == 0) {
+          std::cout << "\033[36m [I" << id_ << " EXPLORE] Immediate broadcast to EXPLOIT siblings\033[0m\n";
+        }
+      } else {
+        // EXPLOIT: Original logic with warmup (to avoid early noise)
+        bool broadcast_enabled = (elapsed_broadcast > Config::BROADCAST_WARMUP_SECONDS);
+        if (broadcast_enabled) {
+          best_to_broadcast.SetHomeIsland(id_);  // Set source island ID
+          for (Island* sibling : exploit_siblings_) {
+            if (sibling != nullptr) {
+              sibling->ReceiveBroadcastBest(best_to_broadcast);
+            }
+          }
+        }
       }
     }
   }
@@ -655,15 +943,22 @@ void Island::RunGeneration() {
     best_fit_for_catastrophe = current_best_.GetFitness();
   }
 
-  // Unified Catastrophe: Trigger only on long stagnation (>3000g)
-  bool stagnation_trigger = (time_since > Config::CATASTROPHE_STAGNATION_GENS);
+  // === ISLAND-SPECIFIC CATASTROPHE THRESHOLDS ===
+  // EXPLOIT: faster trigger (2000g, VND<20%) to escape local optima quickly
+  // EXPLORE: slower trigger (5000g, VND<3%) to allow deep exploration
+  int stag_threshold = IsExploitation() 
+      ? Config::EXPLOIT_CATASTROPHE_STAGNATION_GENS   // 2000g
+      : Config::CATASTROPHE_STAGNATION_GENS;          // 5000g
+  bool stagnation_trigger = (time_since > stag_threshold);
 
-  // VND-based trigger: if VND success rate is critically low (<3%) after many
-  // calls
+  // VND-based trigger with island-specific thresholds
   double vnd_success_rate =
       (diag_vnd_calls_ > 0) ? (100.0 * diag_vnd_improvements_ / diag_vnd_calls_)
                             : 100.0;
-  bool vnd_exhausted = (vnd_success_rate < Config::VND_EXHAUSTED_THRESHOLD &&
+  double vnd_exhausted_thresh = IsExploitation() 
+      ? Config::EXPLOIT_VND_EXHAUSTED_THRESHOLD   // 20%
+      : Config::VND_EXHAUSTED_THRESHOLD;          // 3%
+  bool vnd_exhausted = (vnd_success_rate < vnd_exhausted_thresh &&
                         diag_vnd_calls_ > Config::VND_EXHAUSTED_MIN_CALLS);
 
   if ((stagnation_trigger || vnd_exhausted) &&
@@ -672,7 +967,7 @@ void Island::RunGeneration() {
     std::cout << "\033[96m [CATASTROPHE I" << id_ << "] Trigger: " << reason
               << " (stag=" << time_since << "g, VND=" << std::fixed
               << std::setprecision(1) << vnd_success_rate
-              << "%, CV=" << std::setprecision(2)
+              << "%, Div=" << std::setprecision(2)
               << current_structural_diversity_ << ")\033[0m\n";
     Catastrophy();
     last_catastrophy_gen_ = current_generation_;
@@ -685,8 +980,13 @@ void Island::RunGeneration() {
   if (IsExploitation()) {
     {
       std::lock_guard<std::mutex> lock(best_mutex_);
-      route_pool_.AddRoutesFromSolution(current_best_.GetGenotype(),
-                                        *evaluator_);
+      // Only add to RoutePool if it's a high-quality solution (e.g., current best)
+      // Optimization: No need to re-add the same best every generation if it hasn't changed.
+      // We rely on route_pool_'s internal deduplication, but checking hash/timestamp is faster.
+      // Add routes periodically OR on improvement - enables Frankenstein during stagnation
+      if (stagnation_count_ == 0 || current_generation_ % 100 == 0) {
+        route_pool_.AddRoutesFromSolution(current_best_.GetGenotype(), *evaluator_);
+      }
     }
 
     size_t current_updates = route_pool_.GetTotalRoutesAdded();
@@ -821,15 +1121,7 @@ bool Island::ContainsSolution(const Individual &ind) const {
   return false;
 }
 
-void Island::RunDebugDiagnostics() {
-  std::cout << "\n--- [DIAGNOSTICS GEN " << current_generation_ << "] ---"
-            << std::endl;
-  // Simplified diagnostics to avoid clutter
-  // Checks basic consistency if needed, currently empty for
-  // performance/cleanliness as per refactoring request.
-  std::cout << "Best Fix: " << current_best_.GetFitness()
-            << " | Div: " << current_structural_diversity_ << std::endl;
-}
+// RunDebugDiagnostics() - REMOVED: Dead code, never called
 
 int Island::ApplyMicroSplitMutation(Individual &child) {
   double stagnation_factor = std::min(1.0, (double)stagnation_count_ / 2000.0);
@@ -868,42 +1160,94 @@ int Island::ApplyMutation(Individual &child, bool is_endgame) {
   std::uniform_real_distribution<double> d(0.0, 1.0);
   int executed_op = -1;
   bool mutated = false;
-  bool strong_mutation =
-      false; // To return if significant change happened, allowing VND
+  bool strong_mutation = false; // To return if significant change happened, allowing VND
 
+  // === EXCLUSIVE OPERATOR SETS FOR EXPLORE ===
+  // Each EXPLORE island has a DISTINCT set of operators to maximize diversity
+  // and minimize redundant exploration. This should reduce cache hit rate.
+  if (IsExploration()) {
+    double rnd = d(rng_);
+    switch (id_) {
+      case 0: // DESTRUKTOR - only R&R and Aggressive
+        // Generates chaotic but diverse genetic material
+        if (rnd < 0.65) {
+          // Heavy Ruin & Recreate (30-70% destruction)
+          double intensity = 0.3 + d(rng_) * 0.4; // random intensity 0.3-0.7
+          mutator_.ApplyRuinRecreate(child, intensity, false, rng_);
+          strong_mutation = true;
+        } else {
+          // Aggressive random mutation
+          mutator_.AggressiveMutate(child, rng_);
+          strong_mutation = true;
+        }
+        mutated = true;
+        break;
+        
+      case 2: // RESTRUKTURYZATOR - only MergeSplit and MicroSplit
+        // Restructures route boundaries without random destruction
+        if (rnd < 0.55) {
+          // Merge two groups and redistribute
+          if (mutator_.ApplyMergeSplit(child, rng_)) {
+            strong_mutation = true;
+          }
+        } else {
+          // MicroSplit with varying window sizes (levels 0,1,2)
+          int level = std::uniform_int_distribution<int>(0, 2)(rng_);
+          double stagnation_factor = std::min(1.0, (double)stagnation_count_ / 2000.0);
+          mutator_.ApplyMicroSplitMutation(child, stagnation_factor, level, rng_);
+          strong_mutation = true;
+        }
+        mutated = true;
+        break;
+        
+      case 4: // LOKALNY EKSPLORATOR - SmartMove, Simple, LoadBalance
+        // Fine-grained local improvements, no destructive operators
+        if (rnd < 0.45) {
+          // Smart spatial move to nearby group
+          mutator_.ApplySmartSpatialMove(child, rng_);
+        } else if (rnd < 0.75) {
+          // Simple swap or random move
+          mutator_.ApplySimpleMutation(child, rng_);
+        } else {
+          // Load balancing (chain or swap)
+          if (!ApplyLoadBalancingChainMutation(child)) {
+            ApplyLoadBalancingSwapMutation(child);
+          }
+        }
+        mutated = true;
+        // Local moves are not "strong" - no guaranteed VND trigger
+        break;
+        
+      default:
+        // Fallback (shouldn't happen for EXPLORE islands)
+        mutator_.ApplySimpleMutation(child, rng_);
+        mutated = true;
+        break;
+    }
+    
+    // Return early for EXPLORE - exclusive operator already applied
+    if (strong_mutation) return 2;
+    if (mutated) return 1;
+    return 0;
+  }
+
+  // === EXPLOITATION ISLANDS - ORIGINAL LOGIC ===
+  // (Unchanged for I1, I3, I5)
+  
   // 1. Structural Mutations (MicroSplit)
   if (d(rng_) < p_microsplit_) {
-   // ApplyMicroSplitMutation(child);
+    ApplyMicroSplitMutation(child);
     strong_mutation = true;
     mutated = true;
 #ifdef RESEARCH
-    executed_op = (int)OpType::MUT_SIMPLE; // Mapping MicroSplit to Simple for
-                                           // stats or new enum
+    executed_op = (int)OpType::MUT_SIMPLE;
 #endif
   }
 
   // 2. Standard Mutations (Aggressive / Smart Spatial / Ruin)
-  // Per-island R&R weight for exploration islands
   if (d(rng_) < p_mutation_) {
     double rnd = d(rng_);
-    double rr_threshold = Config::MUT_SPATIAL_THRESHOLD; // default
-
-    // Per-island R&R weighting
-    if (IsExploration()) {
-      switch (id_) {
-      case 0:
-        rr_threshold = 1.0 - Config::EXPLORE_I0_RR_WEIGHT;
-        break; // I0: 60% R&R
-      case 2:
-        rr_threshold = 1.0 - Config::EXPLORE_I2_RR_WEIGHT;
-        break; // I2: 40% R&R
-      case 4:
-        rr_threshold = 1.0 - Config::EXPLORE_I4_RR_WEIGHT;
-        break; // I4: 25% R&R
-      default:
-        break;
-      }
-    }
+    double rr_threshold = Config::MUT_SPATIAL_THRESHOLD;
 
     if (rnd < Config::MUT_AGGRESSIVE_THRESHOLD) {
       mutator_.AggressiveMutate(child, rng_);
@@ -914,7 +1258,7 @@ int Island::ApplyMutation(Individual &child, bool is_endgame) {
       mutator_.ApplySmartSpatialMove(child, rng_);
     } else {
       mutator_.ApplyRuinRecreate(child, (1 - current_structural_diversity_),
-                                 IsExploitation(), rng_);
+                                 true, rng_); // is_exploitation = true
 #ifdef RESEARCH
       executed_op = (int)OpType::MUT_SPATIAL;
 #endif
@@ -923,16 +1267,20 @@ int Island::ApplyMutation(Individual &child, bool is_endgame) {
   }
 
   // 2.5 MergeRegret mutation (re-enabled as requested)
-  if (IsExploitation() && d(rng_) < 0.15) {
+  if (d(rng_) < 0.15) {
     if (ApplyMergeRegret(child)) {
       strong_mutation = true;
       mutated = true;
     }
   }
 
-  // 3. Load Balancing
-  // Configurable switch
-  if (Config::ALLOW_LOAD_BALANCING && d(rng_) < p_loadbalance_) {
+  // 3. Split Overloaded Routes (replaces Load Balancing)
+  // "Remove Returns": Split overloaded routes into fresh vehicles to eliminate internal returns
+  // 3. Load Balancing (Configurable) - SKIP for large instances (O(N²) kills performance)
+  int problem_size = evaluator_->GetSolutionSize();
+  bool allow_lb = Config::ALLOW_LOAD_BALANCING && 
+                  problem_size < Config::LARGE_INSTANCE_THRESHOLD;
+  if (allow_lb && d(rng_) < p_loadbalance_) {
     if (!ApplyLoadBalancingChainMutation(child))
       ApplyLoadBalancingSwapMutation(child);
     mutated = true;
@@ -970,12 +1318,6 @@ int Island::ApplyMutation(Individual &child, bool is_endgame) {
     }
   }
 
-  // Return logic: currently returns int op type, but caller in RunGeneration
-  // needs to know if mutation happened We can return executed_op for stats, and
-  // checking > -1 or similar. However, multiple ops can run. Let's return the
-  // most significant one or just generic. The original RunGeneration used
-  // flags. We will return 1 if meaningful mutation happened (strong), 2 if
-  // weak, 0 if none.
   if (strong_mutation)
     return 2;
   if (mutated)
@@ -986,21 +1328,52 @@ int Island::ApplyMutation(Individual &child, bool is_endgame) {
 void Island::Catastrophy() {
 #ifdef RESEARCH
   catastrophy_activations++;
-  cout << "Catastrophe on island [" << id_ << "] CV: " << std::scientific
+  cout << "Catastrophe on island [" << id_ << "] Div: " << std::scientific
        << std::setprecision(2) << current_structural_diversity_
        << std::defaultfloat << "\n";
 #endif
 
   std::vector<Individual> new_pop;
   new_pop.reserve(population_size_);
+  
+  // === KEEP CURRENT BEST REGARDLESS OF NATIVE STATUS ===
+  // Previously we reset non-native to native, but this breaks "chase mode"
+  // where EXPLOIT tracks the global best from EXPLORE. Keep the best solution
+  // as a seed - it will be refined, not replaced by random initialization.
   {
     std::lock_guard<std::mutex> lock(best_mutex_);
     new_pop.push_back(current_best_);
   }
+  
+  // === RETENTION: Keep top 33% of population as perturbation base ===
+  // Instead of generating 100% new random solutions, keep elite individuals
+  // and apply strong mutation. This preserves search progress.
+  int keep_elite = std::max(1, population_size_ / 3);  // 33% retention
+  
+  {
+    std::lock_guard<std::mutex> pop_lock(population_mutex_);
+    // Sort population by fitness
+    std::sort(population_.begin(), population_.end());
+    
+    // Add elite individuals (starting from index 1 since best is already added)
+    for (int i = 0; i < keep_elite - 1 && i < (int)population_.size(); ++i) {
+      Individual elite_copy = population_[i];
+      // Apply perturbation to elite: 30% R&R mutation
+      mutator_.ApplyRuinRecreate(elite_copy, 0.30, IsExploitation(), rng_);
+      elite_copy.SetNative(true);
+      elite_copy.SetHomeIsland(id_);
+      double fit = SafeEvaluate(elite_copy.GetGenotype());
+      elite_copy.SetFitness(fit);
+      new_pop.push_back(elite_copy);
+    }
+  }
+  
   int sol_size = evaluator_->GetSolutionSize();
 
+  // Generate fresh candidates for remaining slots (67% of population)
+  int remaining = population_size_ - (int)new_pop.size();
   std::vector<Individual> candidates;
-  int candidates_count = population_size_ * 10;
+  int candidates_count = remaining * 5;  // was population_size_ * 10
 
   for (int i = 0; i < candidates_count; ++i) {
     Individual indiv(sol_size);
@@ -1008,6 +1381,10 @@ void Island::Catastrophy() {
       InitIndividual(indiv, INITIALIZATION_TYPE::RANDOM);
     else
       InitIndividual(indiv, INITIALIZATION_TYPE::CHUNKED);
+
+    // Mark as native to this island
+    indiv.SetNative(true);
+    indiv.SetHomeIsland(id_);
 
     // GLS: use clean SafeEvaluate (no double penalty)
     double fit = SafeEvaluate(indiv.GetGenotype());
@@ -1017,11 +1394,11 @@ void Island::Catastrophy() {
 
   std::sort(candidates.begin(), candidates.end());
 
-  for (int i = 0; i < population_size_ - 1; ++i) {
+  for (int i = 0; i < remaining && i < (int)candidates.size(); ++i) {
     Individual &selected = candidates[i];
-    int vnd_threshold = std::max(5, population_size_ / 5);
+    int vnd_threshold = std::max(3, remaining / 5);
     if (i < vnd_threshold) {
-      local_search_.RunVND(selected, 30, true, true, true);
+      local_search_.RunVND(selected, 30, true, true, true, true);
     }
     double clean_fit = SafeEvaluate(selected);
     selected.SetFitness(clean_fit);
@@ -1033,7 +1410,14 @@ void Island::Catastrophy() {
     population_ = new_pop;
     UpdateBiasedFitness();
   }
-  CalculatePopulationCV();
+
+  // Reset adaptive operator success rates (fresh learning)
+  if (IsExploitation()) {
+    adapt_swap_.success_rate = 0.5;
+    adapt_ejection_.success_rate = 0.5;
+    adapt_swap3_.success_rate = 0.5;
+    adapt_swap4_.success_rate = 0.5;
+  }
 
   // IMMUNITY: 15 seconds of no migration after catastrophe
   immune_until_time_ =
@@ -1171,34 +1555,8 @@ int Island::CalculateBrokenPairsDistance(const Individual &ind1,
   return distance;
 }
 
-void Island::CalculatePopulationCV() {
-  if (population_.empty()) {
-    current_structural_diversity_ = 0.0;
-    return;
-  }
-  double mean = 0.0;
-  double M2 = 0.0;
-  int n = 0;
-
-  for (const auto &ind : population_) {
-    double x = ind.GetFitness();
-    if (x > 1e14)
-      continue;
-    n++;
-    double delta = x - mean;
-    mean += delta / n;
-    double delta2 = x - mean;
-    M2 += delta * delta2;
-  }
-
-  if (n < 2) {
-    current_structural_diversity_ = 1.0;
-    return;
-  }
-  double variance = M2 / (n - 1);
-  double std_dev = std::sqrt(variance);
-  current_structural_diversity_ = (mean > 1e-6) ? (std_dev / mean) : 0.0;
-}
+// CalculatePopulationCV() - REMOVED: Dead code, current_structural_diversity_
+// is now correctly calculated via BPD in UpdateBiasedFitness()
 
 int Island::ApplyLoadBalancing(Individual &child) {
   std::uniform_real_distribution<double> d(0.0, 1.0);
@@ -1556,41 +1914,9 @@ Individual Island::CrossoverNeighborBased(const Individual &p1,
   return child;
 }
 
-Individual Island::CrossoverSequence(const Individual &p1,
-                                     const Individual &p2) {
-  const std::vector<int> &perm = evaluator_->GetPermutation();
-  int perm_size = static_cast<int>(perm.size());
-  Individual child = p1;
-  std::vector<int> &child_genes = child.AccessGenotype();
-  const std::vector<int> &p2_genes = p2.GetGenotype();
+// CrossoverSequence() - REMOVED: Dead code, replaced by ApplySREX()
 
-  if (child_genes.empty())
-    return child;
-  int cut_point = rng_() % perm_size;
-
-  for (int i = cut_point; i < perm_size; ++i) {
-    int customer_id = perm[i];
-    int gene_idx = customer_id - 2;
-    if (gene_idx >= 0 && gene_idx < (int)child_genes.size()) {
-      child_genes[gene_idx] = p2_genes[gene_idx];
-    }
-  }
-  return child;
-}
-
-Individual Island::CrossoverUniform(const Individual &p1,
-                                    const Individual &p2) {
-  const std::vector<int> &g1 = p1.GetGenotype();
-  const std::vector<int> &g2 = p2.GetGenotype();
-  int size = static_cast<int>(g1.size());
-  Individual child(size);
-  std::vector<int> &child_genes = child.AccessGenotype();
-
-  for (int i = 0; i < size; ++i) {
-    child_genes[i] = (rng_() % 2 == 0) ? g1[i] : g2[i];
-  }
-  return child;
-}
+// CrossoverUniform() - REMOVED: Dead code, never called
 
 Individual Island::Crossover(const Individual &p1, const Individual &p2) {
 #ifdef RESEARCH
@@ -1628,7 +1954,7 @@ void Island::PrintIndividual(const Individual &individual,
        << " | Ret: " << extra_returns << " | Groups: [";
   for (size_t i = 0; i < group_counts.size(); ++i)
     cout << group_counts[i] << (i < group_counts.size() - 1 ? "," : "");
-  cout << "] CV: " << std::scientific << std::setprecision(2)
+  cout << "] Div: " << std::scientific << std::setprecision(2)
        << current_structural_diversity_ << std::defaultfloat << "\n";
 }
 
@@ -2039,9 +2365,10 @@ void Island::InjectImmigrant(Individual &imigrant) {
     }
   }
 
-  // === IMMEDIATE PATH RELINKING ===
-  // Attempt to combine our Current Best with the fresh Immigrant
-  // We use the Immigrant as the GUIDE, and try to move our Best towards it.
+  // === IMMEDIATE PATH RELINKING - DISABLED FOR PERFORMANCE ===
+  // This ran a full VND+PR on every migrant, but PR is already used as crossover (60-80%)
+  // Disabling saves ~10% compute while maintaining quality via regular PR crossover
+  /*
   {
       Individual pr_runner;
       double best_fit;
@@ -2073,6 +2400,7 @@ void Island::InjectImmigrant(Individual &imigrant) {
           }
       }
   }
+  */
 }
 
 void Island::MutateIndividual(Individual &indiv) {
@@ -2175,6 +2503,37 @@ void Island::TryPullMigrant() {
       if (!top_routes.empty()) {
           std::lock_guard<std::mutex> lock(best_mutex_);
           route_pool_.ImportRoutes(top_routes);
+      }
+  }
+
+  // === TRICKLE MIGRATION (Forced Diversity) ===
+  // 5% chance to pull a diverse migrant regardless of stuck status
+  // This ensures constant "gene flow" to prevent isolation in local optima
+  std::uniform_real_distribution<double> dist_trickle(0.0, 1.0);
+  if (dist_trickle(rng_) < 0.05) { // 5% chance per generation
+      Individual migrant = ring_predecessor_->GetMostDiverseMigrantFor(current_best_);
+      if (migrant.GetFitness() < 1e14) { // Valid check
+          // Inject directly (InjectImmigrant handles logic, but we want to force this as opportunity-like)
+          // We can't force InjectImmigrant to accept, but diverse migrant usually helps.
+          // Let's rely on standard InjectImmigrant logic for now, or bypass if needed.
+          // Actually InjectImmigrant requires stuck OR opportunity.
+          // We want this to be accepted. Let's make it look like an opportunity or modify InjectImmigrant?
+          // Simpler: Just force inject into population if not present.
+          
+          bool accepted = false;
+          {
+             std::lock_guard<std::mutex> lock(population_mutex_);
+             if (!ContainsSolution(migrant)) {
+                 int victim = GetWorstBiasedIndex();
+                 if (victim >= 0) {
+                     population_[victim] = migrant;
+                     accepted = true;
+                 }
+             }
+          }
+          if (accepted) {
+             // std::cout << " [TRICKLE] Injected diverse migrant into I" << id_ << "\n";
+          }
       }
   }
 
@@ -2761,4 +3120,209 @@ std::vector<CachedRoute> Island::GetTopRoutes(int n) const {
     // Actually route_pool_ is a member, accessing it is safe if thread-safe.
     // But let's just delegate.
     return route_pool_.GetBestRoutes(n);
+}
+
+
+void Island::ProcessBroadcastBuffer() {
+  std::vector<Individual> processing_queue;
+  {
+    std::lock_guard<std::mutex> lock(broadcast_mutex_);
+    if (broadcast_buffer_.empty()) return;
+    processing_queue = std::move(broadcast_buffer_);
+    broadcast_buffer_.clear();
+  }
+
+  // Process in main thread - SAFE to use BPD buffers and InjectImmigrant
+  double my_fitness = GetBestFitness();
+
+  for (auto& candidate : processing_queue) {
+    double cand_fit = candidate.GetFitness();
+    
+    // Skip if significantly worse (>5%)
+    if (cand_fit > my_fitness * 1.05) continue;
+    
+    // Check if from EXPLORE
+    int home = candidate.GetHomeIsland();
+    bool from_explore = (home == 0 || home == 2 || home == 4);
+    
+    // === STRATEGY: EXPLOIT keeps its own trajectory, just injects for diversity ===
+    if (from_explore && IsExploitation()) {
+      // DON'T replace current_best - EXPLOIT keeps its own search trajectory!
+      // Just inject broadcast into population for diversity, let natural selection work
+      if (!ContainsSolution(candidate) && cand_fit < my_fitness * 1.05) {
+        InjectImmigrant(candidate);
+        // Reduce log spam - only log if significantly better
+        if (cand_fit < my_fitness * 0.99) {
+          std::cout << "\033[36m [I" << id_ << " EXPLOIT] Injected diversity from I" << home 
+                    << " (fit=" << std::fixed << std::setprecision(0) << cand_fit << ")\033[0m\n";
+        }
+      }
+    } else {
+      // EXPLOIT-to-EXPLOIT: Original logic with filters
+      if (cand_fit >= my_fitness) continue;
+      
+      double fitness_gap = (my_fitness - cand_fit) / my_fitness;
+      bool significantly_better = (fitness_gap > 0.01);
+      
+      bool different_enough = false;
+      if (!significantly_better) {
+        int bpd = CalculateBrokenPairsDistancePublic(current_best_, candidate);
+        int threshold = static_cast<int>(evaluator_->GetSolutionSize() * 0.10);
+        if (bpd > threshold) {
+          different_enough = true;
+        }
+      }
+
+      if (significantly_better || different_enough) {
+        if (significantly_better) {
+          std::cout << "\033[95m [BROADCAST I" << id_ << "] Accepting SUPERIOR broadcast from I" 
+                    << candidate.GetHomeIsland() << " (Gap: " << std::fixed << std::setprecision(2) 
+                    << (fitness_gap*100.0) << "%)\033[0m\n";
+        }
+        InjectImmigrant(candidate);
+      }
+    }
+  }
+}
+
+void Island::ReceiveBroadcastBest(const Individual& best) {
+  // Thread-safe buffering of broadcast
+  std::lock_guard<std::mutex> lock(broadcast_mutex_);
+  
+  // Create a copy and mark as non-native
+  Individual imported = best;
+  imported.SetNative(false);
+  
+  // Just buffer it - no logic here to keep mutex time minimal
+  broadcast_buffer_.push_back(std::move(imported));
+}
+
+void Island::UpdateAdaptiveProbabilities() {
+  // === EPSILON-GREEDY: Update success rates ===
+  // Called every diagnostic interval
+  
+  auto update_rate = [this](AdaptiveOperator& op) {
+    if (op.calls > 0) {
+      double current_rate = static_cast<double>(op.wins) / op.calls;
+      // EMA update of success rate
+      op.success_rate = ADAPT_ALPHA * current_rate + (1.0 - ADAPT_ALPHA) * op.success_rate;
+      // Reset counters for next window
+      op.calls = 0;
+      op.wins = 0;
+    }
+  };
+  
+  update_rate(adapt_swap_);
+  update_rate(adapt_ejection_);
+  update_rate(adapt_swap3_);
+  update_rate(adapt_swap4_);
+}
+
+int Island::SelectAdaptiveOperator() {
+  // EPSILON-GREEDY selection for 4 operators
+  // 90% exploit: pick best operator (highest success_rate)
+  // 10% explore: random operator
+  std::uniform_real_distribution<double> dist(0.0, 1.0);
+  double r = dist(rng_);
+  
+  if (r < ADAPT_EPSILON) {
+    // Exploration: random operator among 4
+    std::uniform_int_distribution<int> op_dist(0, 3);
+    return op_dist(rng_);
+  } else {
+    // Exploitation: pick best among 4
+    double rates[4] = {adapt_swap_.success_rate, adapt_ejection_.success_rate,
+                       adapt_swap3_.success_rate, adapt_swap4_.success_rate};
+    int best = 0;
+    for (int i = 1; i < 4; i++) {
+      if (rates[i] > rates[best]) best = i;
+    }
+    return best;
+  }
+}
+
+// === CACHE HIT RATE TRACKING (CONVERGENCE DETECTION) ===
+
+void Island::TrackCacheResult(bool was_hit) {
+  cache_result_window_.push_back(was_hit);
+  if (was_hit) cache_hits_in_window_++;
+  
+  // Maintain rolling window size
+  if (static_cast<int>(cache_result_window_.size()) > CACHE_WINDOW_SIZE) {
+    if (cache_result_window_.front()) cache_hits_in_window_--;
+    cache_result_window_.pop_front();
+  }
+}
+
+double Island::GetRecentCacheHitRate() const {
+  if (cache_result_window_.empty()) return 0.0;
+  return static_cast<double>(cache_hits_in_window_) / cache_result_window_.size();
+}
+
+void Island::OnConvergenceWarning() {
+  // 85-90% cache hit rate: Double mutation rate for EXPLORE islands
+  if (IsExploration()) {
+    convergence_mutation_boost_ = 2.0;
+    std::cout << "\033[33m [CONV-WARN I" << id_ 
+              << "] Cache hit >85% - Boosting mutation 2x\033[0m\n";
+  }
+}
+
+void Island::OnConvergenceAlarm() {
+  // 90-95% cache hit rate: Force broadcast of best to all siblings
+  convergence_alarm_active_ = true;
+  
+  if (!exploit_siblings_.empty()) {
+    Individual best_copy;
+    {
+      std::lock_guard<std::mutex> lock(best_mutex_);
+      best_copy = current_best_;
+    }
+    
+    for (Island* sibling : exploit_siblings_) {
+      if (sibling != nullptr) {
+        sibling->ReceiveBroadcastBest(best_copy);
+      }
+    }
+    std::cout << "\033[35m [CONV-ALARM I" << id_ 
+              << "] Cache hit >90% - Force broadcasted best to " 
+              << exploit_siblings_.size() << " siblings\033[0m\n";
+  }
+  
+  // Also increase mutation for exploration islands
+  if (IsExploration()) {
+    convergence_mutation_boost_ = 3.0;
+  }
+}
+
+void Island::OnConvergenceCritical() {
+  // >95% cache hit rate: Mini-catastrophe for EXPLOIT (50% population restart)
+  std::cout << "\033[91m [CONV-CRITICAL I" << id_ 
+            << "] Cache hit >95% - ";
+  
+  if (IsExploitation()) {
+    // Restart 50% of population with random individuals
+    std::lock_guard<std::mutex> lock(population_mutex_);
+    int restart_count = population_.size() / 2;
+    
+    for (int i = 0; i < restart_count; ++i) {
+      int victim_idx = rng_() % population_.size();
+      // Don't restart the absolute best
+      if (population_[victim_idx].GetFitness() > current_best_.GetFitness() + 1e-6) {
+        Individual new_ind(evaluator_->GetSolutionSize());
+        InitIndividual(new_ind, INITIALIZATION_TYPE::RANDOM);
+        population_[victim_idx] = new_ind;
+      }
+    }
+    std::cout << "Restarted " << restart_count << " individuals\033[0m\n";
+  } else {
+    // EXPLORE: Maximum mutation boost
+    convergence_mutation_boost_ = 5.0;
+    std::cout << "Boosting mutation 5x\033[0m\n";
+  }
+  
+  // Clear the rolling window to reset detection
+  cache_result_window_.clear();
+  cache_hits_in_window_ = 0;
+  convergence_alarm_active_ = false;
 }

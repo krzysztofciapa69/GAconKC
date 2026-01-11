@@ -1,4 +1,4 @@
-﻿#include "RoutePool.hpp"
+#include "RoutePool.hpp"
 #include "Constants.hpp"
 #include <algorithm>
 #include <cmath>
@@ -64,6 +64,16 @@ double RoutePool::CalculateRouteCost(const std::vector<int>& route,
     return total_cost;
 }
 
+// hash a sorted route for O(1) deduplication
+uint64_t RoutePool::HashRoute(const std::vector<int>& sorted_route) const {
+    uint64_t hash = 14695981039346656037ULL;  // FNV-1a offset basis
+    for (int id : sorted_route) {
+        hash ^= static_cast<uint64_t>(id);
+        hash *= 1099511628211ULL;  // FNV-1a prime
+    }
+    return hash;
+}
+
 void RoutePool::AddRoutesFromSolution(const std::vector<int>& solution,
                                       const ThreadSafeEvaluator& evaluator) {
     const auto& permutation = evaluator.GetPermutation();
@@ -89,11 +99,13 @@ void RoutePool::AddRoutesFromSolution(const std::vector<int>& solution,
     for (const auto& route : group_routes) {
         if (route.size() < Config::MIN_ROUTE_SIZE_FOR_POOL) continue;
 
-        // create sorted copy for trie deduplication
+        // create sorted copy for hash-based deduplication
         std::vector<int> sorted_route = route;
         std::sort(sorted_route.begin(), sorted_route.end());
+        uint64_t hash = HashRoute(sorted_route);
 
-        if (!trie_.Insert(sorted_route)) continue; // already exists
+        // check if already exists
+        if (route_hashes_.count(hash) > 0) continue;
 
         double cost = CalculateRouteCost(route, evaluator);
 
@@ -103,7 +115,7 @@ void RoutePool::AddRoutesFromSolution(const std::vector<int>& solution,
             route_load += static_cast<int>(evaluator.GetDemand(customer_id));
         }
 
-        // calculate efficiency score
+        // calculate efficiency score (lower = better)
         double route_size = static_cast<double>(route.size());
         double load_ratio = static_cast<double>(route_load) / capacity;
         if (load_ratio < 0.01) load_ratio = 0.01;
@@ -114,6 +126,7 @@ void RoutePool::AddRoutesFromSolution(const std::vector<int>& solution,
         cached.nodes = route;
         cached.cost = cost;
         cached.efficiency = efficiency;
+        cached.hash = hash;
 
         // generate bitmask
         cached.bitmask.assign(mask_words, 0);
@@ -126,6 +139,7 @@ void RoutePool::AddRoutesFromSolution(const std::vector<int>& solution,
         }
 
         routes_.push_back(std::move(cached));
+        route_hashes_.insert(hash);
         total_routes_added_++;
     }
 
@@ -139,21 +153,18 @@ void RoutePool::EvictWorstRoutes() {
     std::sort(routes_.begin(), routes_.end());
     size_t target_size = static_cast<size_t>(Config::ROUTE_POOL_MAX_SIZE * 0.9);
     
-    trie_.Clear();
+    // rebuild hash set from survivors
+    route_hashes_.clear();
     routes_.resize(target_size);
-    
-    // rebuild trie from survivors
     for (const auto& r : routes_) {
-        std::vector<int> sorted = r.nodes;
-        std::sort(sorted.begin(), sorted.end());
-        trie_.Insert(sorted);
+        route_hashes_.insert(r.hash);
     }
 }
 
 void RoutePool::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     routes_.clear();
-    trie_.Clear();
+    route_hashes_.clear();
     total_routes_added_ = 0;
 }
 
@@ -390,28 +401,24 @@ void RoutePool::ImportRoutes(const std::vector<CachedRoute>& imported_routes) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     for (const auto& r : imported_routes) {
-        // deduplication check
-        bool exists = false;
-        for (const auto& existing : routes_) {
-            if (existing.nodes.size() == r.nodes.size() && 
-                std::abs(existing.efficiency - r.efficiency) < 1e-6) {
-                if (existing.nodes == r.nodes) {
-                    exists = true;
-                    break;
-                }
-            }
-        }
+        // hash-based deduplication (O(1) per route)
+        if (route_hashes_.count(r.hash) > 0) continue;
         
-        if (!exists) {
-            routes_.push_back(r);
-            total_routes_added_++;
-        }
+        routes_.push_back(r);
+        route_hashes_.insert(r.hash);
+        total_routes_added_++;
     }
     
     // sort and prune
-    std::sort(routes_.begin(), routes_.end());
     if (routes_.size() > Config::ROUTE_POOL_MAX_SIZE) {
+        std::sort(routes_.begin(), routes_.end());
         routes_.resize(Config::ROUTE_POOL_MAX_SIZE);
+        
+        // rebuild hash set
+        route_hashes_.clear();
+        for (const auto& r : routes_) {
+            route_hashes_.insert(r.hash);
+        }
     }
 }
 

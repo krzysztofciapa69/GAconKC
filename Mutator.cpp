@@ -515,3 +515,128 @@ bool Mutator::ApplyMergeSplit(Individual &indiv, std::mt19937 &rng) {
 
   return true;
 }
+
+// ==================================================================================
+// SPLIT OVERLOADED ROUTES - Cuts routes with load > capacity into multiple vehicles
+// Strategy: Identify overloaded routes, calculate how many vehicles are needed,
+// find available empty/low-load groups, and redistribute clients.
+// ==================================================================================
+bool Mutator::ApplySplitOverloadedRoutes(Individual &indiv, std::mt19937 &rng) {
+  if (!evaluator_)
+    return false;
+
+  std::vector<int> &genes = indiv.AccessGenotype();
+  int num_clients = static_cast<int>(genes.size());
+  int num_groups = evaluator_->GetNumGroups();
+  int capacity = evaluator_->GetCapacity();
+  const auto &permutation = evaluator_->GetPermutation();
+
+  // Step 1: Calculate load per group
+  std::vector<int> group_loads(num_groups, 0);
+  std::vector<std::vector<int>> group_clients(num_groups);
+
+  for (int perm_id : permutation) {
+      if (perm_id < 2) continue;
+      int client_idx = perm_id - 2;
+      if (client_idx < 0 || client_idx >= num_clients) continue;
+      int g = genes[client_idx];
+      if (g >= 0 && g < num_groups) {
+          int demand = evaluator_->GetDemand(perm_id);
+          group_loads[g] += demand;
+          group_clients[g].push_back(client_idx);
+      }
+  }
+
+  // Step 2: Identify overloaded groups
+  std::vector<int> overloaded_groups;
+  for (int g = 0; g < num_groups; ++g) {
+      if (group_loads[g] > capacity) {
+          overloaded_groups.push_back(g);
+      }
+  }
+
+  if (overloaded_groups.empty()) return false;
+
+  // Step 3: Identify available target groups (empty or low load)
+  // We prioritize empty groups to act as new vehicles
+  std::vector<int> available_groups;
+  for (int g = 0; g < num_groups; ++g) {
+      if (group_loads[g] == 0) {
+          available_groups.push_back(g);
+      }
+  }
+  // If not enough empty groups, add non-overloaded groups
+  if (available_groups.size() < overloaded_groups.size() * 2) { 
+       for (int g = 0; g < num_groups; ++g) {
+          if (group_loads[g] > 0 && group_loads[g] <= capacity * 0.5) {
+               available_groups.push_back(g);
+          }
+       }
+  }
+  
+  // Sort available groups by load ascending (prefer empty)
+  std::sort(available_groups.begin(), available_groups.end(), [&](int a, int b) {
+      return group_loads[a] < group_loads[b];
+  });
+
+  std::shuffle(overloaded_groups.begin(), overloaded_groups.end(), rng);
+  
+  bool any_change = false;
+  int target_ptr = 0;
+
+  for (int source_g : overloaded_groups) {
+      int total_load = group_loads[source_g];
+      if (total_load <= capacity) continue;
+
+      const auto& clients = group_clients[source_g];
+      if (clients.empty()) continue;
+
+      // Determine how many splits needed
+      // e.g. 170% -> 2 vehicles. 250% -> 3 vehicles.
+      int vehicles_needed = (total_load + capacity - 1) / capacity;
+      int splits_needed = vehicles_needed - 1;
+
+      if (splits_needed <= 0) continue;
+
+      // We need 'splits_needed' new groups
+      if (target_ptr + splits_needed > (int)available_groups.size()) {
+          // Not enough available vehicles to fix this one fully, try next
+          continue; 
+      }
+
+      // Perform the split greedily: fill current, then move to next
+      int current_load = 0;
+      int current_target_g = source_g; // Start with the original group (re-filling it)
+
+      // Reset load for source_g effectively as we are re-assigning its clients
+      // Note: We don't need to explicitly zero group_loads[source_g] here as we track current_load manually
+
+      for (int client_idx : clients) {
+           int customer_id = client_idx + 2;
+           int demand = evaluator_->GetDemand(customer_id);
+
+           // If adding this client exceeds capacity, move to next vehicle
+           // STRICT CHECK: Ensure NO return by switching immediately
+           if (current_load + demand > capacity) {
+                // Do we have another vehicle available?
+                if (target_ptr < (int)available_groups.size()) {
+                    // Move to new group
+                    current_target_g = available_groups[target_ptr++];
+                    current_load = 0;
+                } else {
+                    // No more groups available!
+                    // Must assign here and accept overflow (unavoidable without more vehicles)
+                    // But we used all possible vehicles.
+                }
+           }
+
+           if (current_target_g != source_g) {
+               genes[client_idx] = current_target_g;
+               any_change = true;
+           }
+           current_load += demand;
+      }
+  }
+
+  return any_change;
+}

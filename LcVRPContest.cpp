@@ -181,13 +181,14 @@ int main() {
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
-	bool use_random_permutation = false;
+	bool use_random_permutation = true;
 
 
 	std::cout << "ulaaaaaa";
-   // StartOptimization("Vrp-Set-X", "X-n209-k16", use_random_permutation);
+    //StartOptimization("Vrp-Set-XML100", "XML100_2174_01", use_random_permutation);
+  //  StartOptimization("Vrp-Set-X", "X-n209-k16", use_random_permutation);
 	StartOptimization("Vrp-Set-D", "ORTEC-n323-k21", use_random_permutation);
-//  StartOptimization("Vrp-Set-XXL", "Leuven2", use_random_permutation);
+   //StartOptimization("Vrp-Set-XXL", "Leuven2", use_random_permutation);
 
 
 	return 0;

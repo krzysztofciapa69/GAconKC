@@ -39,7 +39,12 @@ void ProblemGeometry::PrecomputeNeighbors(ThreadSafeEvaluator *evaluator) {
       dists.push_back({d, j});
     }
 
-    size_t keep = std::min((size_t)Config::NUM_NEIGHBORS, dists.size());
+    int neighbor_limit = Config::NUM_NEIGHBORS;
+    if (n > Config::HUGE_INSTANCE_THRESHOLD) {
+      neighbor_limit = 12; // Reduce for huge instances to speed up VND
+    }
+
+    size_t keep = std::min((size_t)neighbor_limit, dists.size());
 
     std::nth_element(dists.begin(), dists.begin() + keep, dists.end());
 

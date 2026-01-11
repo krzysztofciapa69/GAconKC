@@ -15,6 +15,7 @@
 
 #include <array>
 #include <atomic>
+#include <deque>
 #include <mutex>
 #include <random>
 #include <vector>
@@ -34,6 +35,10 @@ public:
   void SetRingPredecessor(Island *pred) { ring_predecessor_ = pred; }
   void TryPullMigrant(); // Pull migrant from predecessor when stuck
   int FindMostSimilarIndex(const Individual &immigrant) const;
+
+  // Non-native broadcast: EXPLOIT islands share best solutions
+  void SetExploitSiblings(std::vector<Island*> siblings) { exploit_siblings_ = siblings; }
+  void ReceiveBroadcastBest(const Individual& best);  // receive broadcasted best from sibling
 
   double EvaluateWithHistoryPenalty(const std::vector<int> &genotype);
   void MutateIndividual(Individual &indiv);
@@ -75,6 +80,14 @@ public:
   // Cache statistics
   long long GetCacheHits() const { return cache_hits_; }
   long long GetCacheMisses() const { return cache_misses_; }
+  
+  // Rolling window cache hit rate (convergence indicator)
+  double GetRecentCacheHitRate() const;
+  
+  // Anti-convergence triggers
+  void OnConvergenceWarning();   // 85-90% hit rate
+  void OnConvergenceAlarm();     // 90-95% hit rate
+  void OnConvergenceCritical();  // >95% hit rate
 
   // Get stuck individuals for inter-archipelago migration
   bool TryGetStuckIndividual(Individual &out);
@@ -133,9 +146,25 @@ private:
   static constexpr int STUCK_THRESHOLD =
       500; // Stagnation threshold for acceptance
 
+  // Non-native broadcast between EXPLOIT islands
+  std::vector<Island*> exploit_siblings_;  // pointers to other EXPLOIT islands (for I1: {I3, I5})
+  std::mutex broadcast_mutex_; // protects broadcast_buffer_
+  std::vector<Individual> broadcast_buffer_; // Thread-safe buffer for incoming broadcasts
+  
+  void ProcessBroadcastBuffer(); // Process buffered broadcasts in main thread
+
   // Cache statistics
   long long cache_hits_ = 0;
   long long cache_misses_ = 0;
+  
+  // Rolling window cache tracking (convergence detection)
+  static constexpr int CACHE_WINDOW_SIZE = 1000;
+  std::deque<bool> cache_result_window_;  // true=hit, false=miss
+  int cache_hits_in_window_ = 0;
+  bool convergence_alarm_active_ = false;
+  double convergence_mutation_boost_ = 1.0;  // multiplier for mutation rate during alarm
+  
+  void TrackCacheResult(bool was_hit);  // update rolling window
 
   // Diagnostic counters (reset every diagnostic interval)
   long long diag_vnd_calls_ = 0;
@@ -151,6 +180,29 @@ private:
   long long diag_srex_wins_ = 0;
   long long diag_neighbor_calls_ = 0;
   long long diag_neighbor_wins_ = 0;
+  long long diag_pr_calls_ = 0;    // Path Relinking as crossover
+  long long diag_pr_wins_ = 0;
+  
+  // === ADAPTIVE OPERATOR SELECTION FOR EXPLOIT ISLANDS ===
+  // Uses EPSILON-GREEDY: 90% best operator, 10% random exploration
+  // One operator is ALWAYS selected each VND call
+  struct AdaptiveOperator {
+    double success_rate = 0.5;  // running success rate (EMA)
+    long long calls = 0;        // calls since last update
+    long long wins = 0;         // improvements found
+  };
+  AdaptiveOperator adapt_swap_;       // 2-Swap (neighbor exchange)
+  AdaptiveOperator adapt_ejection_;   // Ejection Chains
+  AdaptiveOperator adapt_swap3_;      // 3-Swap  
+  AdaptiveOperator adapt_swap4_;      // 4-Swap
+  // Note: PR removed - it's already used as crossover (90% in RunGeneration)
+  static constexpr double ADAPT_ALPHA = 0.2;      // EMA smoothing (faster reaction)
+  static constexpr double ADAPT_EPSILON = Config::ADAPT_EPSILON;  // 25% exploration (from Config)
+  
+  // Update success rates (call periodically)
+  void UpdateAdaptiveProbabilities();
+  // Select one operator using epsilon-greedy
+  int SelectAdaptiveOperator();  // returns 0=Swap, 1=Ejection, 2=3-Swap, 3=4-Swap
   
   std::chrono::steady_clock::time_point last_diag_time_;
 
@@ -190,7 +242,9 @@ private:
   std::chrono::steady_clock::time_point
       last_improvement_time_; // for dynamic immunity
 
+  // Stagnation limit - reduced cap for Exploration to prevent 10k gen sleep
   const int BASE_STAGNATION_LIMIT = 1000;
+  const int MAX_EXPLORATION_STAGNATION = 3000; // Hard cap for I0, I2, I4
 
   // Buffers
   std::vector<int> pred1;
@@ -199,7 +253,7 @@ private:
   std::vector<int> last_in_group2;
 
   // Methods
-  void CalculatePopulationCV();
+  // CalculatePopulationCV() - REMOVED: Dead code
   void UpdateAdaptiveParameters();
   double MapRange(double value, double in_min, double in_max, double out_min,
                   double out_max) const;
@@ -232,9 +286,10 @@ private:
   int GetWorstBiasedIndex() const;
   int GetWorstIndex() const;
 
-  Individual CrossoverUniform(const Individual &p1, const Individual &p2);
+  // CrossoverUniform() - REMOVED: Dead code, never called
+  // CrossoverSequence() - REMOVED: Dead code, replaced by ApplySREX()
   Individual Crossover(const Individual &p1, const Individual &p2);
-  Individual CrossoverSequence(const Individual &p1, const Individual &p2);
+
   Individual CrossoverNeighborBased(const Individual &p1, const Individual &p2);
 
   int ApplyMutation(Individual &child, bool is_endgame);
@@ -262,7 +317,7 @@ private:
   void ApplySplitToIndividual(Individual &indiv);
   Individual ApplySREX(const Individual &p1, const Individual &p2);
 
-  void RunDebugDiagnostics();
+  // RunDebugDiagnostics() - REMOVED: Dead code, never called
   void ApplySuccessionAdaptive(std::vector<Individual> &offspring_pool);
 
 #ifdef RESEARCH

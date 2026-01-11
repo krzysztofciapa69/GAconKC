@@ -1,4 +1,4 @@
-﻿#include "LocalSearch.hpp"
+#include "LocalSearch.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <queue>
 #include <set>
 
 using namespace LcVRPContest;
@@ -76,7 +77,7 @@ void LocalSearch::ResetDLB() { std::fill(dlb_.begin(), dlb_.end(), false); }
 // --- GŁÓWNA PĘTLA OPTYMALIZACJI (ACTIVE SET) ---
 bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
                                     bool allow_swap, bool allow_3swap,
-                                    bool allow_ejection) {
+                                    bool allow_ejection, bool allow_4swap) {
   std::vector<int> &genotype = ind.AccessGenotype();
   int num_groups = evaluator_->GetNumGroups();
   int num_clients = static_cast<int>(genotype.size());
@@ -487,6 +488,14 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
     }
   }
 
+  // === 4-SWAP PHASE ===
+  if (allow_4swap && any_change) {
+    if (Try4Swap(genotype)) {
+      any_change = true;
+      BuildPositions();
+    }
+  }
+
   // === EJECTION CHAIN PHASE (probabilistic, ~20% of clients) ===
   if (allow_ejection) {
     std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
@@ -564,11 +573,11 @@ bool LocalSearch::OptimizeActiveSet(Individual &ind, int max_iter,
 bool LocalSearch::RunVND(Individual &ind, bool heavy_mode) {
   // Legacy interface - use heavy_mode to determine parameters
   int max_iter = heavy_mode ? 50 : 10;
-  return RunVND(ind, max_iter, heavy_mode, false);
+  return RunVND(ind, max_iter, heavy_mode, heavy_mode, heavy_mode, heavy_mode);
 }
 
 bool LocalSearch::RunVND(Individual &ind, int max_iter, bool allow_swap,
-                         bool allow_3swap, bool allow_ejection) {
+                         bool allow_3swap, bool allow_ejection, bool allow_4swap) {
   std::vector<int> &genotype = ind.AccessGenotype();
   if (genotype.empty())
     return false;
@@ -608,13 +617,244 @@ bool LocalSearch::RunVND(Individual &ind, int max_iter, bool allow_swap,
   BuildPositions();
 
   return OptimizeActiveSet(ind, max_iter, allow_swap, allow_3swap,
-                           allow_ejection);
+                           allow_ejection, allow_4swap);
 }
 
-bool LocalSearch::RunDecomposedVND(Individual &ind, bool allow_swap) {
-  // Placeholder zgodnie z prośbą.
-  // W przyszłości tutaj będzie logika wyboru podzbiorów.
-  return false;
+// === SECTOR-BASED DECOMPOSITION FOR LARGE INSTANCES ===
+
+void LocalSearch::PrepareRoutesFromGenotype(const std::vector<int> &genotype) {
+  int num_clients = static_cast<int>(genotype.size());
+  int num_groups = evaluator_->GetNumGroups();
+  
+  for (auto &r : vnd_routes_) r.clear();
+  std::fill(vnd_loads_.begin(), vnd_loads_.end(), 0.0);
+  
+  for (int i = 0; i < num_clients; ++i) {
+    int u = i + 2;
+    int g = genotype[i];
+    if (g >= 0 && g < num_groups) {
+      vnd_routes_[g].push_back(u);
+      vnd_loads_[g] += evaluator_->GetDemand(u);
+    }
+  }
+  
+  // sort routes by customer rank (required for correct insertion)
+  for (auto &r : vnd_routes_) {
+    std::sort(r.begin(), r.end(), [&](int a, int b) {
+      return customer_ranks_[a] < customer_ranks_[b];
+    });
+  }
+  
+  BuildPositions();
+}
+
+void LocalSearch::PartitionBySeedExpansion(int num_sectors) {
+  int num_clients = evaluator_->GetSolutionSize();
+  
+  // already partitioned with same sector count? skip
+  if (sectors_initialized_ && (int)sectors_.size() == num_sectors) {
+    return;
+  }
+  
+  // step 1: pick K seed clients evenly distributed
+  std::vector<int> seeds(num_sectors);
+  for (int s = 0; s < num_sectors; ++s) {
+    seeds[s] = (s * num_clients) / num_sectors;
+  }
+  
+  // shuffle seeds slightly for diversity across runs
+  for (int s = 0; s < num_sectors; ++s) {
+    int offset = (int)(rng_() % 50) - 25;
+    seeds[s] = std::max(0, std::min(num_clients - 1, seeds[s] + offset));
+  }
+  
+  // step 2: BFS expansion from all seeds simultaneously
+  client_sector_.assign(num_clients, -1);
+  std::queue<int> bfs_queue;
+  
+  for (int s = 0; s < num_sectors; ++s) {
+    client_sector_[seeds[s]] = s;
+    bfs_queue.push(seeds[s]);
+  }
+  
+  while (!bfs_queue.empty()) {
+    int curr = bfs_queue.front();
+    bfs_queue.pop();
+    int my_sector = client_sector_[curr];
+    
+    const auto &neighbors = geometry_->GetNeighbors(curr);
+    for (int n_idx : neighbors) {
+      if (n_idx < 0 || n_idx >= num_clients) continue;
+      if (client_sector_[n_idx] == -1) {
+        client_sector_[n_idx] = my_sector;
+        bfs_queue.push(n_idx);
+      }
+    }
+  }
+  
+  // handle orphans (not reached by BFS - assign to nearest seed)
+  for (int i = 0; i < num_clients; ++i) {
+    if (client_sector_[i] == -1) {
+      // assign to sector 0 as fallback
+      client_sector_[i] = i % num_sectors;
+    }
+  }
+  
+  // step 3: collect clients per sector
+  sectors_.assign(num_sectors, SectorInfo());
+  for (int s = 0; s < num_sectors; ++s) {
+    sectors_[s].seed_client = seeds[s];
+    sectors_[s].client_indices.clear();
+  }
+  
+  for (int i = 0; i < num_clients; ++i) {
+    int s = client_sector_[i];
+    if (s >= 0 && s < num_sectors) {
+      sectors_[s].client_indices.push_back(i);
+    }
+  }
+  
+  sectors_initialized_ = true;
+}
+
+bool LocalSearch::OptimizeSector(Individual &ind, int sector_id, int max_iter) {
+  if (sector_id < 0 || sector_id >= (int)sectors_.size()) return false;
+  
+  const auto &sector = sectors_[sector_id];
+  if (sector.client_indices.empty()) return false;
+  
+  // set active clients to only this sector
+  client_indices_ = sector.client_indices;
+  std::shuffle(client_indices_.begin(), client_indices_.end(), rng_);
+  
+  // run optimization on restricted set
+  return OptimizeActiveSet(ind, max_iter, false, false, false);
+}
+
+bool LocalSearch::RefineBoundaries(Individual &ind, int max_iter) {
+  int num_clients = evaluator_->GetSolutionSize();
+  int num_sectors = (int)sectors_.size();
+  
+  if (num_sectors == 0) return false;
+  
+  // identify boundary clients (neighbors in different sectors)
+  client_indices_.clear();
+  client_indices_.reserve(num_clients / 4);  // estimate 25% are boundaries
+  
+  for (int i = 0; i < num_clients; ++i) {
+    int my_sector = client_sector_[i];
+    bool is_boundary = false;
+    
+    const auto &neighbors = geometry_->GetNeighbors(i);
+    for (int n_idx : neighbors) {
+      if (n_idx < 0 || n_idx >= num_clients) continue;
+      if (client_sector_[n_idx] != my_sector) {
+        is_boundary = true;
+        break;
+      }
+    }
+    
+    if (is_boundary) {
+      client_indices_.push_back(i);
+    }
+  }
+  
+  if (client_indices_.empty()) return false;
+  
+  std::shuffle(client_indices_.begin(), client_indices_.end(), rng_);
+  
+  // run optimization allowing cross-sector moves
+  return OptimizeActiveSet(ind, max_iter, false, false, false);
+}
+
+bool LocalSearch::RunDecomposedVND(Individual &ind, int max_iter, bool exploration_mode) {
+  std::vector<int> &genotype = ind.AccessGenotype();
+  if (genotype.empty()) return false;
+  
+  int num_clients = static_cast<int>(genotype.size());
+  
+  // for small instances, fall back to standard VND
+  if (num_clients < Config::LARGE_INSTANCE_THRESHOLD) {
+    return RunVND(ind, max_iter, false, false, false);
+  }
+  
+  // EXPLORATION MODE: ultra-aggressive speed optimization
+  // - More sectors (smaller = faster per-sector)
+  // - Fewer iterations per sector
+  // - Single boundary pass (or none)
+  int num_sectors;
+  int sector_iter;
+  int boundary_passes;
+  int boundary_iter;
+  
+  if (exploration_mode) {
+    // EXPLORATION: speed is everything, quality is secondary
+    if (num_clients > Config::HUGE_INSTANCE_THRESHOLD) {
+      num_sectors = 32;   // n=4000+ -> 125 clients/sector (very fast)
+      sector_iter = 1;    // minimal iterations
+      boundary_passes = 0; // skip boundary entirely for speed
+      boundary_iter = 0;
+    } else if (num_clients > 2500) {
+      num_sectors = 20;   // n=2500-4000
+      sector_iter = 1;
+      boundary_passes = 1; // single quick pass
+      boundary_iter = 2;
+    } else {
+      num_sectors = 12;   // n=1500-2500
+      sector_iter = 2;
+      boundary_passes = 1;
+      boundary_iter = 3;
+    }
+  } else {
+    // EXPLOITATION: quality matters, pay the time cost
+    if (num_clients > Config::HUGE_INSTANCE_THRESHOLD) {
+      num_sectors = 24;  // n=4000+ -> ~160 clients/sector (faster)
+      sector_iter = std::max(2, max_iter / num_sectors);
+      boundary_passes = 2;
+      boundary_iter = std::max(3, max_iter / 3);
+    } else if (num_clients > 2500) {
+      num_sectors = 12;
+      sector_iter = std::max(2, max_iter / num_sectors);
+      boundary_passes = 2;
+      boundary_iter = std::max(3, max_iter / 3);
+    } else {
+      num_sectors = 8;
+      sector_iter = std::max(2, max_iter / num_sectors);
+      boundary_passes = 2;
+      boundary_iter = std::max(3, max_iter / 3);
+    }
+  }
+  
+  // phase 1: partition (lazy, cached)
+  PartitionBySeedExpansion(num_sectors);
+  
+  // phase 2: prepare routes from genotype
+  PrepareRoutesFromGenotype(genotype);
+  
+  // reset DLB
+  if (dlb_.size() != genotype.size()) {
+    dlb_.assign(num_clients, false);
+  } else {
+    ResetDLB();
+  }
+  
+  // phase 3: optimize each sector independently
+  bool any_change = false;
+  
+  for (int s = 0; s < num_sectors; ++s) {
+    if (OptimizeSector(ind, s, sector_iter)) {
+      any_change = true;
+    }
+  }
+  
+  // phase 4: boundary refinement (configurable passes)
+  for (int pass = 0; pass < boundary_passes; ++pass) {
+    if (RefineBoundaries(ind, boundary_iter)) {
+      any_change = true;
+    }
+  }
+  
+  return any_change;
 }
 
 bool LocalSearch::RunFullVND(Individual &ind, bool allow_swap) {
@@ -1152,40 +1392,38 @@ double LocalSearch::CalculateInsertionDelta(int client_id, int target_route,
     return 1e30;
 
   const auto &route = vnd_routes_[target_route];
-  int curr_idx = client_id - 1; // Matrix index
+//  int curr_idx = client_id - 1; // Matrix index
 
-  double best_delta = 1e30;
-  best_insert_pos = 0;
-
-  // Try inserting at each position
+  // Determine strictly valid position based on Permutation Ranks
+  // Evaluator builds routes by iterating permutation, so relative order is fixed.
+  int rank_u = customer_ranks_[client_id];
   int route_size = static_cast<int>(route.size());
+  
+  int pos = 0;
+  while (pos < route_size) {
+      if (customer_ranks_[route[pos]] > rank_u) break;
+      pos++;
+  }
+  best_insert_pos = pos;
 
-  for (int pos = 0; pos <= route_size; ++pos) {
-    int prev_idx = (pos > 0) ? (route[pos - 1] - 1) : 0;      // 0 = depot
-    int next_idx = (pos < route_size) ? (route[pos] - 1) : 0; // 0 = depot
+  // Calculate Delta for this SINGLE valid position
+  int prev_idx = (pos > 0) ? (route[pos - 1] - 1) : 0;      // 0 = depot
+  int next_idx = (pos < route_size) ? (route[pos] - 1) : 0; // 0 = depot
+  int curr_idx = client_id - 1;
 
-    // Delta = dist(prev, curr) + dist(curr, next) - dist(prev, next)
-    double old_cost, new_cost;
+  double old_cost, new_cost;
 
-    if (fast_matrix_) {
-      old_cost = fast_matrix_[prev_idx * matrix_dim_ + next_idx];
-      new_cost = fast_matrix_[prev_idx * matrix_dim_ + curr_idx] +
-                 fast_matrix_[curr_idx * matrix_dim_ + next_idx];
-    } else {
-      old_cost = evaluator_->GetDist(prev_idx, next_idx);
-      new_cost = evaluator_->GetDist(prev_idx, curr_idx) +
-                 evaluator_->GetDist(curr_idx, next_idx);
-    }
-
-    double delta = new_cost - old_cost;
-
-    if (delta < best_delta) {
-      best_delta = delta;
-      best_insert_pos = pos;
-    }
+  if (fast_matrix_) {
+    old_cost = fast_matrix_[prev_idx * matrix_dim_ + next_idx];
+    new_cost = fast_matrix_[prev_idx * matrix_dim_ + curr_idx] +
+               fast_matrix_[curr_idx * matrix_dim_ + next_idx];
+  } else {
+    old_cost = evaluator_->GetDist(prev_idx, next_idx);
+    new_cost = evaluator_->GetDist(prev_idx, curr_idx) +
+               evaluator_->GetDist(curr_idx, next_idx);
   }
 
-  return best_delta;
+  return new_cost - old_cost;
 }
 
 bool LocalSearch::WouldOverflow(int target_route, int client_id) const {
@@ -1225,16 +1463,49 @@ bool LocalSearch::Try3Swap(std::vector<int> &genotype) {
   int num_groups = evaluator_->GetNumGroups();
   const double EPSILON = 1e-4;
 
-  // Pick 3 distinct random clients
-  int idx1 = rng_() % num_clients;
-  int idx2 = rng_() % num_clients;
-  int idx3 = rng_() % num_clients;
+  // === SMART CLIENT SELECTION ===
+  // Prioritize clients from "tight routes" (>90% capacity) - they benefit most from reassignment
+  int capacity = evaluator_->GetCapacity();
+  double tight_threshold = capacity * 0.90;
+  
+  // Compute route loads on-the-fly for this genotype
+  std::vector<int> route_loads(num_groups, 0);
+  for (int i = 0; i < num_clients; ++i) {
+    int g = genotype[i];
+    if (g >= 0 && g < num_groups) {
+      int client_id = i + 2;  // client ID = genotype index + 2
+      route_loads[g] += evaluator_->GetDemand(client_id);
+    }
+  }
+  
+  // Build pool of "tight route clients"
+  std::vector<int> tight_clients;
+  for (int i = 0; i < num_clients; ++i) {
+    int g = genotype[i];
+    if (g >= 0 && g < num_groups && route_loads[g] > tight_threshold) {
+      tight_clients.push_back(i);
+    }
+  }
+  
+  // Selection strategy: 60% from tight routes (if available), 40% random
+  auto select_client = [&]() -> int {
+    std::uniform_real_distribution<double> d(0.0, 1.0);
+    if (!tight_clients.empty() && d(rng_) < 0.60) {
+      return tight_clients[rng_() % tight_clients.size()];
+    }
+    return rng_() % num_clients;
+  };
+  
+  // Pick 3 distinct clients using smart selection
+  int idx1 = select_client();
+  int idx2 = select_client();
+  int idx3 = select_client();
 
   // Ensure distinct
   int attempts = 0;
   while ((idx1 == idx2 || idx1 == idx3 || idx2 == idx3) && attempts++ < 20) {
-    idx2 = rng_() % num_clients;
-    idx3 = rng_() % num_clients;
+    idx2 = select_client();
+    idx3 = select_client();
   }
   if (idx1 == idx2 || idx1 == idx3 || idx2 == idx3)
     return false;

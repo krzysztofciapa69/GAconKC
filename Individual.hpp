@@ -34,6 +34,12 @@ namespace LcVRPContest {
         void ResetStagnation() { stagnation_counter_ = 0; }
         int GetStagnation() const { return stagnation_counter_; }
 
+        // Native tracking: false = imported from another island via broadcast
+        bool IsNative() const { return is_native_; }
+        void SetNative(bool native) { is_native_ = native; }
+        int GetHomeIsland() const { return home_island_; }
+        void SetHomeIsland(int id) { home_island_ = id; }
+
     private:
         std::vector<int> genotype_;
         double fitness_;
@@ -42,5 +48,7 @@ namespace LcVRPContest {
         double diversity_score_;
         double biased_fitness_;
         bool is_evaluated_;
+        bool is_native_ = true;  // true = originated on this island
+        int home_island_ = -1;   // which island created this solution
     };
 }
